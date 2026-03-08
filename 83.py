@@ -152,7 +152,7 @@ while running:
     text_rect = text_surf.get_rect(center=(WIDTH//2, HEIGHT - 70))
     screen.blit(text_surf, text_rect)
     
-    sub_text = font_sub.render("by bac sy lap trinh", True, (150, 150, 255))
+    sub_text = font_sub.render("Huy Vũ", True, (150, 150, 255))
     sub_rect = sub_text.get_rect(center=(WIDTH//2, HEIGHT - 30))
     screen.blit(sub_text, sub_rect)
 
