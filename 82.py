@@ -148,7 +148,22 @@ while running:
 
     # 4. HIỂN THỊ TEXT
     text_color = (255, 150, 200)
-    text_surf = font_main.render("Happy women day 8/3 Nguyễn Huyền Lan Anh Phương Linh", True, text_color)
+    text_surf = font_main.render("Happy women day 8/3", True, text_color)
+    font1 = pygame.font.SysFont(None, 36)
+font2 = pygame.font.SysFont(None, 28)
+font3 = pygame.font.SysFont(None, 22)
+
+name1 = font1.render("Nguyễn Huyền", True, (255, 200, 200))
+name2 = font2.render("Lan Anh", True, (255, 200, 200))
+name3 = font3.render("Phương Linh", True, (255, 200, 200))
+
+rect1 = name1.get_rect(center=(WIDTH/2, HEIGHT - 150))
+rect2 = name2.get_rect(center=(WIDTH/2, HEIGHT - 125))
+rect3 = name3.get_rect(center=(WIDTH/2, HEIGHT - 105))
+
+screen.blit(name1, rect1)
+screen.blit(name2, rect2)
+screen.blit(name3, rect3)
     text_rect = text_surf.get_rect(center=(WIDTH//2, HEIGHT - 70))
     screen.blit(text_surf, text_rect)
     
