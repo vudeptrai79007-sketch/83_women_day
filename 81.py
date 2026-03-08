@@ -148,7 +148,7 @@ while running:
 
     # 4. HIỂN THỊ TEXT
     text_color = (255, 150, 200)
-    text_surf = font_main.render("Happy women day 8/3", True, text_color)
+    text_surf = font_main.render("Happy women day 8/3 Nguyễn Huyền Lan Anh Phương Linh", True, text_color)
     text_rect = text_surf.get_rect(center=(WIDTH//2, HEIGHT - 70))
     screen.blit(text_surf, text_rect)
     
