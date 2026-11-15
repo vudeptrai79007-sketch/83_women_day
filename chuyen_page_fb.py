@@ -4,15 +4,19 @@ import os
 import re
 import time
 import urllib.parse
+import uuid
 import requests
 
 
 class FacebookAdminManager:
-  """Class chuyển thể từ Li2/S.smali (FacebookAdminManager) trong MTool Max"""
+  """Chuyển thể nguyên bản 100% từ Li2/S.smali, Lh2/X0.smali, Lh2/y.smali và LD2/q.smali"""
 
   GRAPHQL_URL = "https://graph.facebook.com/graphql"
 
-  # Hằng số từ Li2/S.smali
+  # Hai mã client_doc_id gốc trích xuất từ Smali
+  DOC_ID_ACTION = "30749539927629244093798192451"  # Dùng cho STEP 1, STEP 2, STEP 4
+  DOC_ID_FETCH_INVITE = "221080835214205752894689842827"  # Dùng cho STEP 3 (Lấy invitation_id)
+
   BLOKS_VERSION = (
       "338f8ead5977a2c41eba3e92584dcf1d132e8b7928f1f5796662ec064023047d"
   )
@@ -30,14 +34,7 @@ class FacebookAdminManager:
 
   @staticmethod
   def parse_proxy(proxy_str: str) -> dict:
-    """Chuyển thể từ hàm Li2/S.b(Ljava/lang/String;)LF2/E;
-
-    Hỗ trợ các định dạng:
-      - host:port
-      - user:pass@host:port
-      - host:port:user:pass
-      - http://..., socks4://..., socks5://...
-    """
+    """Chuyển thể từ hàm Li2/S.b(Ljava/lang/String;)LF2/E;"""
     if not proxy_str or not proxy_str.strip():
       return None
 
@@ -85,7 +82,7 @@ class FacebookAdminManager:
 
   @classmethod
   def build_headers(cls, access_token: str) -> dict:
-    """Chuyển thể từ hàm Li2/S.i(Ljava/lang/String;)Ljava/util/HashMap;"""
+    """Chuyển thể từ Li2/S.i(Ljava/lang/String;)Ljava/util/HashMap;"""
     analytics_tags = {
         "network_tags": {
             "product": "350685531728",
@@ -110,7 +107,7 @@ class FacebookAdminManager:
 
   @classmethod
   def build_nt_context(cls) -> dict:
-    """Chuyển thể từ hàm Li2/S.d()Lorg/json/JSONObject;"""
+    """Chuyển thể từ Li2/S.d()Lorg/json/JSONObject;"""
     return {
         "using_white_navbar": True,
         "styles_id": cls.STYLES_ID,
@@ -124,7 +121,7 @@ class FacebookAdminManager:
 
   @staticmethod
   def build_permissions() -> dict:
-    """Chuyển thể từ hàm Li2/S.e()Lorg/json/JSONObject;"""
+    """Chuyển thể từ Li2/S.e()Lorg/json/JSONObject;"""
     return {
         "ads": True,
         "insights": True,
@@ -135,20 +132,22 @@ class FacebookAdminManager:
     }
 
   @classmethod
-  def build_variables(cls, params_obj: dict) -> dict:
-    """Chuyển thể từ hàm Li2/S.f(Lorg/json/JSONObject;Lorg/json/JSONObject;)Lorg/json/JSONObject;"""
+  def build_variables(cls, params_obj: dict, nt_context: dict = None) -> dict:
+    """Chuyển thể từ Li2/S.f(Lorg/json/JSONObject;Lorg/json/JSONObject;)Lorg/json/JSONObject;"""
+    if nt_context is None:
+      nt_context = cls.build_nt_context()
     return {
         "params": params_obj,
-        "nt_context": cls.build_nt_context(),
+        "nt_context": nt_context,
         "scale": "2",
         "use_native_entrypoint_for_stars_on_reels": True,
-        "profile_image_size": 188,
+        "profile_image_size": 188,  # 0xbc
         "include_image_ranges": True,
     }
 
   @staticmethod
   def build_form_data(client_doc_id: str, variables_obj: dict) -> dict:
-    """Chuyển thể từ hàm Li2/S.c(Ljava/lang/String;Lorg/json/JSONObject;)Ljava/util/HashMap;"""
+    """Chuyển thể từ Li2/S.c(Ljava/lang/String;Lorg/json/JSONObject;)Ljava/util/HashMap;"""
     return {
         "method": "post",
         "pretty": "false",
@@ -158,13 +157,15 @@ class FacebookAdminManager:
         "fb_api_req_friendly_name": "NativeTemplateAsyncQuery",
         "fb_api_caller_class": "graphservice",
         "client_doc_id": client_doc_id,
-        "fb_api_client_context": json.dumps({"is_background": False}),
+        "fb_api_client_context": json.dumps(
+            {"is_background": False}, separators=(",", ":")
+        ),
         "variables": json.dumps(variables_obj, separators=(",", ":")),
     }
 
   @staticmethod
   def extract_invitation_id(resp_json: dict) -> str:
-    """Chuyển thể từ hàm Li2/S.h(Lorg/json/JSONObject;)Ljava/lang/String;"""
+    """Chuyển thể từ Li2/S.h(Lorg/json/JSONObject;)Ljava/lang/String;"""
     try:
       attrs = resp_json["data"]["native_template_screen"]["nt_bundle"][
           "nt_bundle_attributes"
@@ -184,144 +185,236 @@ class FacebookAdminManager:
     return None
 
   def post_graphql(
-      self, client_doc_id: str, params_obj: dict, token: str, is_receiver=False
+      self, step_name: str, form_data: dict, token: str, is_receiver: bool
   ) -> dict:
-    """Chuyển thể từ hàm Li2/S.g(...)"""
-    variables = self.build_variables(params_obj)
-    form_data = self.build_form_data(client_doc_id, variables)
+    """Chuyển thể từ Li2/S.g(Ljava/lang/String;Ljava/util/HashMap;Ljava/lang/String;LF2/E;)Lorg/json/JSONObject;"""
     headers = self.build_headers(token)
     proxies = self.receiver_proxies if is_receiver else self.sender_proxies
+
+    encoded_parts = []
+    for k, v in form_data.items():
+      encoded_parts.append(f"{k}={urllib.parse.quote_plus(str(v))}")
+    body_str = "&".join(encoded_parts)
 
     resp = requests.post(
         self.GRAPHQL_URL,
         headers=headers,
-        data=form_data,
+        data=body_str,
         proxies=proxies,
         timeout=20,
     )
-    resp.raise_for_status()
+    if not resp.ok:
+      raise RuntimeError(f"[{step_name}] HTTP {resp.status_code}: {resp.text}")
+
     data = resp.json()
     data["_http_status"] = resp.status_code
     return data
 
   # =========================================================================
-  # LUỒNG CHUYỂN PAGE (GỬI LỜI MỜI ADMIN & AUTO ACCEPT)
+  # 4 BƯỚC CHUYỂN PAGE & AUTO ACCEPT NGUYÊN BẢN TỪ SMALI
   # =========================================================================
+  def execute_step1(
+      self, page_id: str, target_uid: str, password: str, sender_token: str
+  ) -> dict:
+    """STEP 1 (Lh2/X0 :pswitch_5): Xác thực mật khẩu tài khoản cầm Page"""
+    payload_path = (
+        "/nt/profile/admin_management/permissions_reauth?admin_id="
+        f"{target_uid}"
+        "&admin_rows_container_id=%5B%228bxxoh%3A2%22%2Cnull%5D"
+        "&admin_type=full_access"
+        "&entry_point_screen_id=%5B%227o2xil%3A5%22%2Cnull%5D"
+        f"&profile_id={page_id}"
+        "&state_ids%5Bauthenticated%5D=8csr9g%3A0"
+        "&state_ids%5Bauthentication_attempted%5D=8csr9g%3A1"
+        "&state_ids%5Bshow_entry_point_saving_spinner%5D=8bxxoh%3A0"
+        "&state_ids%5Bshow_saving_spinner%5D=8csr9g%3A3"
+        "&state_ids%5Bads%5D=8clnk7%3A2"
+        "&state_ids%5Bcontent%5D=8clnk7%3A3"
+        "&state_ids%5Binsights%5D=8clnk7%3A4"
+        "&state_ids%5Bmessages%5D=8clnk7%3A5"
+        "&state_ids%5Bmoderate%5D=8clnk7%3A6"
+    )
+    nt_context = self.build_nt_context()
+    sensitive_array = [["password", password]]
+    client_data = {
+        "sensitive_string_value": json.dumps(
+            sensitive_array, separators=(",", ":")
+        )
+    }
+    params_obj = {
+        "nt_context": nt_context,
+        "payload": payload_path,
+        "client_data": client_data,
+    }
+    variables = self.build_variables(params_obj, nt_context)
+    form_data = self.build_form_data(self.DOC_ID_ACTION, variables)
+    return self.post_graphql(
+        "STEP1", form_data, sender_token, is_receiver=False
+    )
+
+  def execute_step2(
+      self, page_id: str, target_uid: str, sender_token: str
+  ) -> dict:
+    """STEP 2 (Lh2/y :pswitch_7): Kích hoạt cấp quyền full_access & bắn thông báo lời mời"""
+    payload_path = (
+        "/nt/profile/admin_management/permissions/update?"
+        "admin_rows_container_id=%5B%228bxxoh%3A2%22%2Cnull%5D"
+        "&entry_point_screen_id=%5B%227o2xil%3A5%22%2Cnull%5D"
+        f"&admin_type=full_access&profile_id={page_id}"
+        f"&target_admin_id={target_uid}"
+        "&secured_sensitive_actions%5B0%5D=page_admin_access_addition"
+        "&state_ids%5Bshow_entry_point_saving_spinner%5D=8bxxoh%3A0"
+        "&state_ids%5Bads%5D=8clnk7%3A2"
+        "&state_ids%5Bcontent%5D=8clnk7%3A3"
+        "&state_ids%5Binsights%5D=8clnk7%3A4"
+        "&state_ids%5Bmessages%5D=8clnk7%3A5"
+        "&state_ids%5Bmoderate%5D=8clnk7%3A6"
+    )
+    nt_context = self.build_nt_context()
+    permissions = self.build_permissions()
+    params_obj = {
+        "payload": payload_path,
+        "state_data": json.dumps(permissions, separators=(",", ":")),
+        "nt_context": nt_context,
+    }
+    variables = self.build_variables(params_obj, nt_context)
+    form_data = self.build_form_data(self.DOC_ID_ACTION, variables)
+    form_data["fb_api_analytics_tags"] = '["GraphServices"]'
+    form_data["client_trace_id"] = str(uuid.uuid4())
+    return self.post_graphql(
+        "STEP2", form_data, sender_token, is_receiver=False
+    )
+
+  def execute_step3(
+      self, page_id: str, target_uid: str, receiver_token: str
+  ) -> dict:
+    """STEP 3 (LD2/q.d()): Truy vấn màn hình lời mời bên Acc nhận để lấy invitation_id"""
+    nt_context = self.build_nt_context()
+    inner_params = {
+        "screen_id": '["sz9fnp:17",null]',
+        "profile_id": str(page_id),
+        "invitee_id": str(target_uid),
+    }
+    outer_params = {
+        "nt_context": nt_context,
+        "path": "/nt/profile/admin_management/invitation",
+        "params": json.dumps(inner_params, separators=(",", ":")),
+        "extra_client_data": {},
+    }
+    variables = {
+        "params": outer_params,
+        "scale": "2",
+        "use_native_entrypoint_for_stars_on_reels": True,
+        "nt_context": nt_context,
+    }
+    form_data = self.build_form_data(self.DOC_ID_FETCH_INVITE, variables)
+    form_data["purpose"] = "fetch"
+    form_data["fb_api_req_friendly_name"] = "NativeTemplateScreenQuery"
+    form_data["fb_api_analytics_tags"] = (
+        '["surfaces.fb.GraphServiceEmitter","GraphServices"]'
+    )
+    form_data["client_trace_id"] = str(uuid.uuid4())
+    return self.post_graphql(
+        "STEP3", form_data, receiver_token, is_receiver=True
+    )
+
+  def execute_step4(self, invitation_id: str, receiver_token: str) -> dict:
+    """STEP 4 (LD2/q.a()): Gửi lệnh chấp nhận lời mời Admin bằng Token Acc nhận"""
+    payload_path = (
+        "/nt/profile/admin_management/invitation_response?"
+        f"accept_invitation=1&invitation_id={invitation_id}&admin_type=full_access"
+    )
+    nt_context = self.build_nt_context()
+    params_obj = {
+        "payload": payload_path,
+        "nt_context": nt_context,
+    }
+    variables = self.build_variables(params_obj, nt_context)
+    form_data = self.build_form_data(self.DOC_ID_ACTION, variables)
+    form_data["fb_api_analytics_tags"] = '["GraphServices"]'
+    form_data["client_trace_id"] = str(uuid.uuid4())
+    return self.post_graphql(
+        "STEP4", form_data, receiver_token, is_receiver=True
+    )
+
   def transfer_page(
       self,
       page_id: str,
-      page_or_admin_token: str,
+      sender_token: str,
       password: str,
       target_uid: str,
       receiver_token: str = None,
       auto_accept: bool = False,
-      client_doc_id_step1: str = "119940804239956818821550724",
   ) -> dict:
-    """Thực hiện chuyển Page và trả về dict kết quả (Output)."""
     result = {
         "page_id": page_id,
         "target_uid": target_uid,
-        "step1_invite": False,
         "invitation_id": None,
-        "step2_accept": False,
         "status": "FAILED",
         "message": "",
     }
 
     try:
-      print(
-          f"[*] Đang gửi lời mời quản trị Page {page_id} tới UID"
-          f" {target_uid}..."
-      )
+      # --- BƯỚC 1: XÁC THỰC MẬT KHẨU & KHỞI TẠO LỜI MỜI ---
+      print(f"[*] [STEP 1] Đang xác thực mật khẩu cho Page {page_id}...")
+      resp1 = self.execute_step1(page_id, target_uid, password, sender_token)
+      if "errors" in resp1:
+        result["message"] = f"Step 1 failed with errors: {resp1['errors']}"
+        return result
+      print("    -> ✅ Bước 1 hoàn thành (Xác thực thành công)")
 
-      # Cách 1: Gọi qua Graph API chuẩn cho Page truyền thống / Profile Plus
-      url_roles = f"https://graph.facebook.com/v19.0/{page_id}/roles"
-      payload_roles = {
-          "admin": target_uid,
-          "role": "ADMIN",
-          "password": password,
-          "tasks": json.dumps(
-              ["MANAGE", "CREATE_CONTENT", "MODERATE", "ADVERTISE", "ANALYZE"]
-          ),
-          "access_token": page_or_admin_token,
-      }
-      resp1 = requests.post(
-          url_roles,
-          data=payload_roles,
-          proxies=self.sender_proxies,
-          timeout=20,
-      )
-      resp1_json = resp1.json()
-
-      # Nếu Graph API /roles không hỗ trợ (Page Profile Plus yêu cầu NativeTemplateAsyncQuery)
-      if not resp1.ok or "error" in resp1_json:
-        # Fallback sang cấu trúc NativeTemplateAsyncQuery trong Li2/S.smali
-        inner_params = {
-            "page_id": str(page_id),
-            "admin_id": str(target_uid),
-            " invitee_id": str(target_uid),
-            "password": password,
-            **self.build_permissions(),
-        }
-        nt_params = {
-            "path": "/pages/settings/admin_management/invite/",
-            "params": json.dumps(inner_params),
-        }
-        resp1_json = self.post_graphql(
-            client_doc_id=client_doc_id_step1,
-            params_obj=nt_params,
-            token=page_or_admin_token,
-            is_receiver=False,
-        )
-
-      if "error" in resp1_json or "errors" in resp1_json:
-        err_msg = resp1_json.get("error", {}).get("message") or str(
-            resp1_json.get("errors")
-        )
-        result["message"] = f"Bước 1 thất bại: {err_msg}"
+      # --- BƯỚC 2: CẬP NHẬT QUYỀN & BẮN THÔNG BÁO ---
+      print(f"[*] [STEP 2] Đang kích hoạt gửi thông báo mời UID {target_uid}...")
+      resp2 = self.execute_step2(page_id, target_uid, sender_token)
+      if "errors" in resp2:
+        result["message"] = f"Step 2 failed with errors: {resp2['errors']}"
         return result
 
-      result["step1_invite"] = True
-      result["invitation_id"] = self.extract_invitation_id(resp1_json)
-      print("[+] Bước 1 hoàn thành - Đã gửi lời mời Admin!")
-
-      # Bước 2 & 3: Tự động chấp nhận nếu có bật Auto Accept và có Token nhận
-      if auto_accept and receiver_token:
-        print(
-            "[*] Chờ 3 giây trước khi tự động chấp nhận lời mời bên tài khoản"
-            " nhận..."
-        )
-        time.sleep(3)
-
-        # Thử accept qua endpoint page_admin_invite hoặc GraphQL
-        accept_url = f"https://graph.facebook.com/v19.0/{page_id}/roles"
-        accept_payload = {
-            "access_token": receiver_token,
-            "method": "POST",
-        }
-        resp_acc = requests.post(
-            accept_url,
-            data=accept_payload,
-            proxies=self.receiver_proxies,
-            timeout=20,
-        )
-        acc_json = resp_acc.json()
-
-        if resp_acc.ok and acc_json.get("success"):
-          result["step2_accept"] = True
-          result["status"] = "SUCCESS"
-          result["message"] = (
-              "Đã gửi lời mời và Auto Accept thành công!"
-          )
-        else:
-          result["status"] = "INVITED_ONLY"
-          result["message"] = (
-              f"Đã gửi lời mời thành công, nhưng Auto Accept trả về: {acc_json}"
-          )
-      else:
+      # Nếu không bật Auto Accept thì kết thúc tại Bước 2 như Lw2/e.m()
+      if not auto_accept or not receiver_token:
         result["status"] = "SUCCESS"
         result["message"] = (
-            "Đã gửi lời mời thành công (Chế độ không Auto Accept)."
+            "✅ Bước 2 hoàn thành - Đã gửi thông báo lời mời Admin!"
+        )
+        return result
+
+      # --- ĐỢI 5 GIÂY NHƯ TRONG Lw2/o.m() ---
+      for remaining in range(5, 0, -1):
+        print(
+            f"    -> ✅ Đã kích hoạt nhận thông báo! Chờ {remaining}s để tiếp"
+            " tục..."
+        )
+        time.sleep(1)
+
+      # --- BƯỚC 3: LẤY INVITATION_ID BÊN ACC NHẬN ---
+      print(
+          "[*] [STEP 3] Đang dùng Token nhận lấy mã invitation_id từ"
+          " thông báo..."
+      )
+      resp3 = self.execute_step3(page_id, target_uid, receiver_token)
+      invitation_id = self.extract_invitation_id(resp3)
+      if not invitation_id:
+        result["status"] = "INVITED_ONLY"
+        result["message"] = (
+            "Step 3 failed: Không thể extract invitation ID từ response"
+        )
+        return result
+
+      result["invitation_id"] = invitation_id
+      print(f"    -> ✅ Đã tìm thấy invitation_id: {invitation_id}")
+
+      # --- BƯỚC 4: TỰ ĐỘNG CHẤP NHẬN LỜI MỜI ---
+      print(
+          f"[*] [STEP 4] Đang tự động chấp nhận lời mời ({invitation_id})..."
+      )
+      resp4 = self.execute_step4(invitation_id, receiver_token)
+      if "errors" not in resp4 and resp4.get("_http_status") == 200:
+        result["status"] = "SUCCESS"
+        result["message"] = "✅ Đã tự động chấp nhận lời mời thành công!"
+      else:
+        result["status"] = "INVITED_ONLY"
+        result["message"] = (
+            f"Accept invitation failed: {resp4.get('errors', resp4)}"
         )
 
       return result
@@ -332,21 +425,20 @@ class FacebookAdminManager:
 
 
 # =====================================================================
-# CHƯƠNG TRÌNH CHÍNH: XỬ LÝ ĐẦU VÀO (INPUT) & ĐẦU RA (OUTPUT)
+# GIAO DIỆN ĐẦU VÀO (INPUT) & ĐẦU RA (OUTPUT)
 # =====================================================================
-def process_line(line: str) -> dict:
-  """Định dạng dòng đầu vào:
+def parse_input_line(line: str) -> dict:
+  """Định dạng mỗi dòng:
 
-  PAGE_ID|TOKEN_GOC|PASS_GOC|UID_NHAN|TOKEN_NHAN(tùy chọn)|PROXY_GOC(tùy
+  PAGE_ID|TOKEN_CAM_PAGE|MAT_KHAU|UID_NHAN|TOKEN_NHAN(tùy chọn)|PROXY_GUI(tùy
   chọn)|PROXY_NHAN(tùy chọn)
   """
   parts = [p.strip() for p in line.split("|")]
   if len(parts) < 4:
     raise ValueError(
-        "Dòng dữ liệu thiếu trường bắt buộc (Cần ít nhất:"
-        " PAGE_ID|TOKEN_GOC|PASS_GOC|UID_NHAN)"
+        "Thiếu thông tin! Cần tối thiểu:"
+        " PAGE_ID|TOKEN_CAM_PAGE|MAT_KHAU|UID_NHAN"
     )
-
   return {
       "page_id": parts[0],
       "sender_token": parts[1],
@@ -359,50 +451,44 @@ def process_line(line: str) -> dict:
 
 
 def main():
-  print("=" * 65)
-  print("        TOOL CHUYỂN PAGE FACEBOOK (PORT TỪ MTOOL MAX)        ")
-  print("=" * 65)
-  print("Chọn chế độ Đầu Vào (Input):")
-  print("  1. Nhập thủ công từng Page trên màn hình")
-  print("  2. Đọc hàng loạt từ file 'input_chuyen_page.txt'")
-  mode = input("Lựa chọn của bạn (1/2): ").strip()
+  print("=" * 68)
+  print("   TOOL CHUYỂN PAGE & AUTO ACCEPT FULL 4 BƯỚC (MTOOL MAX PORT)   ")
+  print("=" * 68)
+  print("1. Nhập trực tiếp trên màn hình")
+  print("2. Chạy hàng loạt từ file 'input_chuyen_page.txt'")
+  choice = input("Chọn chế độ (1/2): ").strip()
 
   tasks = []
-  if mode == "2":
-    input_file = "input_chuyen_page.txt"
-    if not os.path.exists(input_file):
-      with open(input_file, "w", encoding="utf-8") as f:
+  if choice == "2":
+    infile = "input_chuyen_page.txt"
+    if not os.path.exists(infile):
+      with open(infile, "w", encoding="utf-8") as f:
         f.write(
-            "# Định dạng:"
-            " PAGE_ID|TOKEN_GOC|PASS_GOC|UID_NHAN|TOKEN_NHAN|PROXY_GOC|PROXY_NHAN\n"
+            "# PAGE_ID|TOKEN_CAM_PAGE|MAT_KHAU|UID_NHAN|TOKEN_NHAN|PROXY_GUI|PROXY_NHAN\n"
         )
       print(
-          f"[!] Chưa có file '{input_file}'. Đã tạo file mẫu, hãy điền dữ liệu"
-          " vào rồi chạy lại!"
+          f"[!] Đã tạo file mẫu '{infile}'. Hãy dán dữ liệu vào rồi chạy lại."
       )
       return
-
-    with open(input_file, "r", encoding="utf-8") as f:
+    with open(infile, "r", encoding="utf-8") as f:
       for line in f:
         line = line.strip()
         if line and not line.startswith("#"):
           try:
-            tasks.append(process_line(line))
+            tasks.append(parse_input_line(line))
           except Exception as e:
             print(f"[!] Bỏ qua dòng lỗi: {line} ({e})")
   else:
-    page_id = input("- Nhập ID Page cần chuyển: ").strip()
-    sender_token = input(
-        "- Nhập Token Acc cầm Page (EAAG.../EAAAA...): "
-    ).strip()
-    password = input("- Nhập Mật khẩu Acc cầm Page: ").strip()
-    target_uid = input("- Nhập UID Acc nhận Page: ").strip()
+    page_id = input("- ID Page (profile_id): ").strip()
+    sender_token = input("- Token Acc cầm Page: ").strip()
+    password = input("- Mật khẩu Acc cầm Page: ").strip()
+    target_uid = input("- UID Acc nhận Page: ").strip()
     receiver_token = input(
-        "- Nhập Token Acc nhận (Để trống nếu không Auto Accept): "
+        "- Token Acc nhận Page (Enter nếu không Auto Accept): "
     ).strip()
-    sender_proxy = input("- Nhập Proxy Acc gửi (Để trống nếu không dùng): ").strip()
+    sender_proxy = input("- Proxy Acc cầm Page (Enter nếu không dùng): ").strip()
     receiver_proxy = input(
-        "- Nhập Proxy Acc nhận (Để trống nếu không dùng): "
+        "- Proxy Acc nhận Page (Enter nếu không dùng): "
     ).strip()
 
     tasks.append({
@@ -416,58 +502,50 @@ def main():
     })
 
   if not tasks:
-    print("[!] Không có dữ liệu đầu vào để xử lý.")
+    print("[!] Không có dữ liệu để chạy.")
     return
 
-  success_file = "output_chuyen_page_success.txt"
-  error_file = "output_chuyen_page_error.txt"
-
-  print(f"\n[*] Bắt đầu xử lý {len(tasks)} yêu cầu chuyển Page...\n")
+  success_out = "output_success.txt"
+  failed_out = "output_failed.txt"
 
   for idx, item in enumerate(tasks, 1):
     print(
-        f"--- [{idx}/{len(tasks)}] Page: {item['page_id']} -> UID:"
+        f"\n--- [{idx}/{len(tasks)}] Chuyển Page {item['page_id']} ->"
         f" {item['target_uid']} ---"
     )
     auto_accept = bool(item["receiver_token"])
-
     manager = FacebookAdminManager(
         sender_proxy=item["sender_proxy"],
         receiver_proxy=item["receiver_proxy"],
     )
-
     res = manager.transfer_page(
         page_id=item["page_id"],
-        page_or_admin_token=item["sender_token"],
+        sender_token=item["sender_token"],
         password=item["password"],
         target_uid=item["target_uid"],
         receiver_token=item["receiver_token"],
         auto_accept=auto_accept,
     )
 
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_line = (
-        f"{timestamp} | Page: {res['page_id']} | To: {res['target_uid']} |"
-        f" Status: {res['status']} | InviteID: {res['invitation_id']} | Msg:"
+        f"{now} | Page: {res['page_id']} | UID Nhận: {res['target_uid']} |"
+        f" InviteID: {res['invitation_id']} | Status: {res['status']} |"
         f" {res['message']}"
     )
+    print(f"=> {log_line}")
 
-    print(f"=> KẾT QUẢ: {log_line}\n")
-
-    # Ghi Đầu Ra (Output) ra file
-    target_file = (
-        success_file
+    out_path = (
+        success_out
         if res["status"] in ("SUCCESS", "INVITED_ONLY")
-        else error_file
+        else failed_out
     )
-    with open(target_file, "a", encoding="utf-8") as f:
+    with open(out_path, "a", encoding="utf-8") as f:
       f.write(log_line + "\n")
 
-  print("=" * 65)
-  print("HOÀN TẤT! Kết quả đầu ra đã được lưu vào:")
-  print(f"  - Thành công : {os.path.abspath(success_file)}")
-  print(f"  - Thất bại   : {os.path.abspath(error_file)}")
-  print("=" * 65)
+  print("\n" + "=" * 68)
+  print(f"Hoàn tất! Kết quả lưu tại: {os.path.abspath(success_out)}")
+  print("=" * 68)
 
 
 if __name__ == "__main__":
