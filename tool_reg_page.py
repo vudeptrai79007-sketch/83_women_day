@@ -2,8 +2,12 @@
 """
 ================================================================================
 TOOL REG PAGE PRO5 & GET TOKEN EAAAAU TỰ ĐỘNG - BẢN ALL-IN-ONE (CHẠY MỌI THIẾT BỊ)
-Hỗ trợ chạy mượt mà trên cả PC (Windows/Linux/Mac) và Điện thoại (Termux / Pydroid 3).
-Toàn bộ tính năng gói gọn trong 1 file duy nhất, chỉ cần duy nhất thư viện requests!
+Quy trình chuẩn cho từng Acc:
+1. Reg xong 1 Acc (1 hoặc nhiều Page)
+2. Delay đếm ngược 20s
+3. Check lại Token (kiểm tra Live/Die & quét danh sách Page thực tế)
+4. Nếu kiểm tra CÓ PAGE -> Chuyển sang Acc Cầm Page (Lưu tách file acc_cam_page.txt
+   & hỗ trợ tự động bắn/nhận quyền Admin sang Acc Cầm Page chính).
 ================================================================================
 """
 
@@ -20,9 +24,8 @@ import hashlib
 import struct
 import datetime
 import threading
-import urllib.parse
 from queue import Queue, Empty
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Callable
 
 try:
     import requests
@@ -46,69 +49,17 @@ class Colors:
     BLUE = "\033[94m"
     MAGENTA = "\033[95m"
 
-# Tự động kích hoạt ANSI color trên Windows
 if sys.platform == "win32":
     os.system("color")
 
 PRINT_LOCK = threading.Lock()
 FILE_LOCK = threading.Lock()
-COUNTDOWN_LOCK = threading.Lock()
-COUNTDOWN_STATUS = {}
-ACTIVE_COUNTDOWN_LINE = False
 
 def safe_print(msg: str):
     """In ra màn hình an toàn đa luồng, không bị đè chữ."""
-    global ACTIVE_COUNTDOWN_LINE
     with PRINT_LOCK:
-        if ACTIVE_COUNTDOWN_LINE:
-            sys.stdout.write("\r" + " " * 110 + "\r")
-            ACTIVE_COUNTDOWN_LINE = False
         print(msg)
         sys.stdout.flush()
-
-def update_countdown_display():
-    """Vẽ lại dòng trạng thái đếm ngược trực quan từng giây của các luồng."""
-    global ACTIVE_COUNTDOWN_LINE
-    with PRINT_LOCK:
-        with COUNTDOWN_LOCK:
-            if not COUNTDOWN_STATUS:
-                if ACTIVE_COUNTDOWN_LINE:
-                    sys.stdout.write("\r" + " " * 110 + "\r")
-                    sys.stdout.flush()
-                    ACTIVE_COUNTDOWN_LINE = False
-                return
-
-            parts = [COUNTDOWN_STATUS[k] for k in sorted(COUNTDOWN_STATUS.keys())]
-            text = " | ".join(parts)
-            out = f"\r{Colors.YELLOW}⏳ {text}{Colors.RESET}"
-            sys.stdout.write(out + "    ")
-            sys.stdout.flush()
-            ACTIVE_COUNTDOWN_LINE = True
-
-def sleep_with_countdown(total_seconds: int, thread_id: int, label: str = "Nghỉ", uid: str = ""):
-    """Đếm ngược từng giây một cách mượt mà và trực quan trên màn hình."""
-    if total_seconds <= 0:
-        return
-
-    uid_str = f"[{uid}] " if uid else ""
-    end_time = time.time() + total_seconds
-
-    while True:
-        remaining = int(end_time - time.time())
-        if remaining <= 0:
-            break
-
-        with COUNTDOWN_LOCK:
-            COUNTDOWN_STATUS[thread_id] = f"[Luồng {thread_id}] {uid_str}{label}: {remaining}s"
-
-        update_countdown_display()
-        time.sleep(1)
-
-    with COUNTDOWN_LOCK:
-        if thread_id in COUNTDOWN_STATUS:
-            del COUNTDOWN_STATUS[thread_id]
-
-    update_countdown_display()
 
 def clear_screen():
     os.system("cls" if sys.platform == "win32" else "clear")
@@ -116,16 +67,16 @@ def clear_screen():
 def print_banner():
     clear_screen()
     safe_print(f"{Colors.CYAN}{Colors.BOLD}")
-    safe_print("=" * 72)
-    safe_print("    TOOL REG PAGE PRO5 & GET TOKEN EAAAAU - BẢN ALL-IN-ONE (MOBILE/PC)  ")
-    safe_print("     Chuẩn Katana FB4A Android | Name Việt/US | Đa Luồng | Auto Limit   ")
-    safe_print("=" * 72)
+    safe_print("=" * 78)
+    safe_print("  TOOL REG PAGE PRO5 -> REG XONG 1 ACC ĐỢI 20S CHECK TOKEN -> ACC CẦM PAGE  ")
+    safe_print("        Chuẩn Katana FB4A Android | Name Việt/US | Đa Luồng | Auto Limit     ")
+    safe_print("=" * 78)
     safe_print(f"{Colors.RESET}")
 
 def input_multiline(prompt: str) -> List[str]:
     """Hỗ trợ dán trực tiếp nhiều dòng trên điện thoại và PC."""
     safe_print(prompt)
-    safe_print(f"{Colors.YELLOW}(Dán nội dung vào đây. Dán xong nhấn Enter 2 lần để chạy):{Colors.RESET}")
+    safe_print(f"{Colors.YELLOW}(Dán nội dung vào đây. Dán xong nhấn Enter 2 lần để xác nhận):{Colors.RESET}")
     lines = []
     empty_count = 0
     while True:
@@ -154,13 +105,11 @@ def parse_proxy(proxy_str: Optional[str]) -> Optional[Dict[str, str]]:
     Tự động chuẩn hóa mọi định dạng proxy:
     - IPv4, IPv6 ([ipv6]:port:user:pass, ipv6:port...)
     - HTTP, HTTPS, SOCKS5, SOCKS4
-    - Có mật khẩu hoặc không có mật khẩu, proxy xoay IP
     """
     if not proxy_str or not str(proxy_str).strip():
         return None
     p = str(proxy_str).strip()
 
-    # 1. Đã có scheme
     if p.startswith(("http://", "https://", "socks5://", "socks4://")):
         scheme, rest = p.split("://", 1)
         if "@" in rest:
@@ -177,7 +126,6 @@ def parse_proxy(proxy_str: Optional[str]) -> Optional[Dict[str, str]]:
         formatted = f"{scheme}://{auth_str}{host_port}"
         return {"http": formatted, "https": formatted}
 
-    # 2. Dạng User:Pass@Host:Port
     if "@" in p:
         auth, host_port = p.rsplit("@", 1)
         if not host_port.startswith("[") and host_port.count(":") >= 2:
@@ -187,7 +135,6 @@ def parse_proxy(proxy_str: Optional[str]) -> Optional[Dict[str, str]]:
         formatted = f"http://{auth}@{host_port}"
         return {"http": formatted, "https": formatted}
 
-    # 3. Định dạng ngoặc vuông IPv6: [IPv6]:Port:User:Pass
     m_bracket = re.match(r"^\[([a-fA-F0-9:]+)\]:(\d+)(?::([^:]+):(.+))?$", p)
     if m_bracket:
         ipv6, port, user, pwd = m_bracket.groups()
@@ -198,7 +145,6 @@ def parse_proxy(proxy_str: Optional[str]) -> Optional[Dict[str, str]]:
         return {"http": formatted, "https": formatted}
 
     parts = p.split(":")
-    # 4.1. IPv4: IP:Port hoặc IP:Port:User:Pass
     if len(parts) == 2 and parts[1].isdigit():
         return {"http": f"http://{parts[0]}:{parts[1]}", "https": f"http://{parts[0]}:{parts[1]}"}
 
@@ -207,7 +153,6 @@ def parse_proxy(proxy_str: Optional[str]) -> Optional[Dict[str, str]]:
         formatted = f"http://{user}:{pwd}@{ip}:{port}"
         return {"http": formatted, "https": formatted}
 
-    # 4.2. IPv6 trần
     if p.count(":") >= 3:
         if len(parts) >= 4 and parts[-3].isdigit():
             port, user, pwd = parts[-3], parts[-2], parts[-1]
@@ -262,10 +207,6 @@ LOCALES = ['vi_VN', 'en_US']
 
 
 def generate_random_katana_ua(seed: Optional[str] = None) -> str:
-    """
-    Sinh User-Agent Katana Android thực tế, chuẩn định dạng 100% như trong file HAR.
-    Nếu truyền `seed` (ví dụ Token), UA sẽ được CỐ ĐỊNH DUY NHẤT cho nick đó!
-    """
     if seed:
         seed_int = int(hashlib.md5(str(seed).encode("utf-8")).hexdigest(), 16)
         rng = random.Random(seed_int)
@@ -357,7 +298,7 @@ def get_page_name(name_type: str = "viet", custom_names: Optional[List[str]] = N
 
 
 # ==============================================================================
-# 5. BỘ LỌC TỰ ĐỘNG BÓC TÁCH TOKEN EAAAAU & ACCOUNT
+# 5. BỘ LỌC TỰ ĐỘNG BÓC TÁCH TOKEN EAAAAU, ACC CẦM PAGE & ACCOUNT
 # ==============================================================================
 
 def parse_token_line(line: str) -> Optional[Dict[str, str]]:
@@ -366,7 +307,6 @@ def parse_token_line(line: str) -> Optional[Dict[str, str]]:
     if not raw or raw.startswith("#"):
         return None
 
-    # Tìm Token EAAAAU
     token_match = re.search(r'(EAAAAU[A-Za-z0-9]+)', raw)
     if not token_match:
         return None
@@ -375,7 +315,6 @@ def parse_token_line(line: str) -> Optional[Dict[str, str]]:
     proxy = None
     uid = None
 
-    # Tìm UID nếu có trong dòng
     parts = raw.split("|")
     for p in parts:
         p_clean = p.strip()
@@ -393,7 +332,6 @@ def parse_token_line(line: str) -> Optional[Dict[str, str]]:
         if u_match:
             uid = u_match.group(1)
 
-    # Tìm Proxy nếu có
     for p in parts:
         p_clean = p.strip()
         if p_clean == token or p_clean == uid:
@@ -414,6 +352,23 @@ def parse_tokens_from_lines(lines: List[str]) -> List[Dict[str, str]]:
         if it:
             results.append(it)
     return results
+
+
+def parse_holder_line(line: str) -> Optional[Dict[str, str]]:
+    """Bóc tách thông tin Acc Cầm Page (nhận cả UID đơn thuần hoặc dòng chứa Token EAAAAU)."""
+    raw = str(line).strip()
+    if not raw or raw.startswith("#"):
+        return None
+
+    tok_match = re.search(r'(EAAAAU[A-Za-z0-9]+)', raw)
+    uid_match = re.search(r'\b(1000\d{10,12}|615\d{11,13}|\d{10,16})\b', raw)
+
+    token = tok_match.group(1) if tok_match else ""
+    uid = uid_match.group(1) if uid_match else ""
+
+    if not uid and not token:
+        return None
+    return {"uid": uid, "token": token}
 
 
 def parse_account_line(line: str) -> Optional[Dict[str, str]]:
@@ -439,11 +394,10 @@ def parse_account_line(line: str) -> Optional[Dict[str, str]]:
 
 
 # ==============================================================================
-# 6. TỰ SINH MÃ 2FA TOTP THUẦN PYTHON (KHÔNG CẦN CÀI PYOTP)
+# 6. TỰ SINH MÃ 2FA TOTP THUẦN PYTHON
 # ==============================================================================
 
 def generate_totp_code(secret: str) -> str:
-    """Tạo mã 2FA 6 số chuẩn RFC 6238 bằng thư viện chuẩn của Python."""
     clean_secret = secret.replace(" ", "").upper()
     if len(clean_secret) == 6 and clean_secret.isdigit():
         return clean_secret
@@ -467,7 +421,6 @@ def generate_totp_code(secret: str) -> str:
 # ==============================================================================
 
 def login_and_get_token(acc: Dict[str, str], custom_ua: Optional[str] = None) -> Dict[str, Any]:
-    """Đăng nhập Facebook Katana Android để lấy Token EAAAAU."""
     uid = acc.get("uid", "")
     pwd = acc.get("pwd", "")
     twofa = acc.get("twofa", "")
@@ -486,35 +439,73 @@ def login_and_get_token(acc: Dict[str, str], custom_ua: Optional[str] = None) ->
         "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
         "Content-Type": "application/x-www-form-urlencoded",
         "X-FB-Connection-Type": "WIFI",
+        "X-FB-HTTP-Engine": "Liger",
     }
 
     url = "https://b-api.facebook.com/method/auth.login"
+    device_id = str(uuid.uuid4())
+    family_device_id = str(uuid.uuid4())
+
     data = {
+        "adid": str(uuid.uuid4()),
+        "format": "json",
+        "device_id": device_id,
         "email": uid,
         "password": pwd,
-        "format": "json",
+        "generate_analytics_claim": "1",
+        "community_id": "",
+        "cpl": "true",
+        "try_num": "1",
+        "family_device_id": family_device_id,
+        "credentials_type": "password",
         "generate_session_cookies": "1",
+        "error_detail_type": "button_with_disabled",
+        "source": "login",
         "generate_machine_id": "1",
+        "meta_inf_fbmeta": "",
+        "advertiser_id": str(uuid.uuid4()),
+        "currently_logged_in_userid": "0",
         "locale": "vi_VN",
         "client_country_code": "VN",
         "method": "auth.login",
+        "fb_api_req_friendly_name": "authenticate",
+        "fb_api_caller_class": "com.facebook.account.login.protocol.Fb4aAuthHandler",
         "access_token": "350685531728|62f8ce9f74b12f84c123cc23437a4a32"
     }
 
     try:
         res = s.post(url, headers=headers, data=data, timeout=30).json()
 
-        # Nếu cần 2FA
         if res.get("error_code") in [406, 405] or "two_factor" in str(res).lower():
             if twofa:
+                err_data = res.get("error_data", {})
+                if isinstance(err_data, str):
+                    try:
+                        err_data = json.loads(err_data)
+                    except Exception:
+                        err_data = {}
+
+                first_factor = err_data.get("login_first_factor", "")
+                real_uid = str(err_data.get("uid", uid))
                 code_2fa = generate_totp_code(twofa)
-                data["credentials_type"] = "two_factor"
-                data["two_factor_code"] = code_2fa
-                res = s.post(url, headers=headers, data=data, timeout=30).json()
+
+                if code_2fa:
+                    data["email"] = real_uid
+                    data["password"] = code_2fa
+                    data["credentials_type"] = "two_factor"
+                    data["two_factor_code"] = code_2fa
+                    if first_factor:
+                        data["first_factor"] = first_factor
+                    res = s.post(url, headers=headers, data=data, timeout=30).json()
 
         if "access_token" in res:
             token = res["access_token"]
-            return {"success": True, "uid": uid, "token": token, "name": res.get("user_storage", {}).get("name", "")}
+            return {
+                "success": True,
+                "uid": str(res.get("uid", uid)),
+                "token": token,
+                "name": res.get("user_storage", {}).get("name", "")
+            }
         else:
             err = res.get("error_msg") or res.get("message") or str(res)
             return {"success": False, "uid": uid, "message": err}
@@ -523,7 +514,7 @@ def login_and_get_token(acc: Dict[str, str], custom_ua: Optional[str] = None) ->
 
 
 # ==============================================================================
-# 8. CORE REG PAGE PRO5 (GRAPHQL KATANA BLOKS)
+# 8. CORE REG PAGE PRO5 & KIỂM TRA LẠI TOKEN SAU 20S KHI REG XONG 1 ACC
 # ==============================================================================
 
 GRAPHQL_URL = "https://graph.facebook.com/graphql"
@@ -546,9 +537,10 @@ class FbPageCreator:
 
         self.mother_uid = ""
 
-    def _get_headers(self, friendly_name: str) -> Dict[str, str]:
+    def _get_headers(self, friendly_name: str, token_override: Optional[str] = None) -> Dict[str, str]:
+        active_token = token_override or self.token
         return {
-            "authorization": f"OAuth {self.token}",
+            "authorization": f"OAuth {active_token}",
             "x-fb-sim-hni": "45201",
             "x-fb-net-hni": "45201",
             "content-type": "application/x-www-form-urlencoded",
@@ -565,20 +557,71 @@ class FbPageCreator:
         }
 
     def get_user_info(self) -> Dict[str, Any]:
+        """Kiểm tra Token còn sống hay đã DIE."""
         try:
-            r = self.session.get(f"https://graph.facebook.com/me?access_token={self.token}", timeout=25).json()
+            r = self.session.get(
+                f"https://graph.facebook.com/me?fields=id,name&access_token={self.token}",
+                headers={"User-Agent": self.user_agent},
+                timeout=25
+            ).json()
             if "id" in r:
                 self.mother_uid = str(r["id"])
                 return {"success": True, "uid": str(r["id"]), "name": r.get("name", "Facebook User")}
             err = r.get("error", {})
             err_msg = err.get("message", "Token lỗi hoặc Nick DIE")
-            is_die = "OAuthException" in str(r) or err.get("code") in [190, 102] or "checkpoint" in str(r).lower() or "error" in r
+            is_die = (
+                "OAuthException" in str(r)
+                or err.get("code") in [190, 102]
+                or "checkpoint" in str(r).lower()
+                or "error" in r
+            )
             return {"success": False, "is_token_die": is_die, "message": err_msg}
         except Exception as e:
             return {"success": False, "is_token_die": False, "message": str(e)}
 
-    def create_page(self, page_name: str) -> Dict[str, Any]:
-        """Tạo Page Pro5 qua 2 bước Katana."""
+    def check_token_and_get_pages(self) -> Dict[str, Any]:
+        """
+        Check lại Token và lấy danh sách toàn bộ Page thực tế đang có trong nick qua me/accounts.
+        """
+        # Bước 1: Kiểm tra lại trạng thái sống/chết của chính Token đó
+        info = self.get_user_info()
+        if not info.get("success"):
+            return {
+                "success": False,
+                "is_token_die": info.get("is_token_die", False),
+                "pages": [],
+                "message": info.get("message", "Token DIE khi check lại")
+            }
+
+        # Bước 2: Quét danh sách Page trong me/accounts
+        try:
+            url = (
+                f"https://graph.facebook.com/me/accounts"
+                f"?fields=id,name,access_token,additional_profile_id,category"
+                f"&limit=100&access_token={self.token}"
+            )
+            r = self.session.get(url, headers={"User-Agent": self.user_agent}, timeout=25).json()
+
+            if "error" in r:
+                err = r.get("error", {})
+                err_msg = err.get("message", "Token DIE khi lấy danh sách Page")
+                is_die = (
+                    "OAuthException" in str(r)
+                    or err.get("code") in [190, 102]
+                    or "checkpoint" in str(r).lower()
+                )
+                return {"success": False, "is_token_die": is_die, "pages": [], "message": err_msg}
+
+            pages = r.get("data", []) if isinstance(r.get("data"), list) else []
+            return {"success": True, "is_token_die": False, "pages": pages, "uid": info.get("uid")}
+        except Exception as e:
+            return {"success": False, "is_token_die": False, "pages": [], "message": str(e)}
+
+    def send_create_page_request(self, page_name: str) -> Dict[str, Any]:
+        """
+        Chỉ gửi request tạo 1 Page Pro5 (Bước 1 + Bước 2).
+        Chưa kết luận có Page ngay mà đợi reg xong Acc rồi mới nghỉ 20s check lại Token.
+        """
         if self.ua_mode == "random":
             self.user_agent = generate_random_katana_ua()
 
@@ -618,7 +661,7 @@ class FbPageCreator:
         try:
             r1 = self.session.post(GRAPHQL_URL, headers=self._get_headers(d1["fb_api_req_friendly_name"]), data=d1, timeout=30)
             if "OAuthException" in r1.text or r1.status_code == 401:
-                return {"success": False, "is_token_die": True, "message": "Token DIE / Hết hạn"}
+                return {"success": False, "is_token_die": True, "message": "Token DIE ở Bước 1"}
             if "Tên này không hợp lệ" in r1.text or "tên không hợp lệ" in r1.text.lower():
                 return {"success": False, "is_name_invalid": True, "message": "Tên Page không hợp lệ"}
         except Exception as e:
@@ -665,123 +708,196 @@ class FbPageCreator:
             res2 = r2.text
 
             if "OAuthException" in res2 or r2.status_code == 401 or "Session expired" in res2:
-                return {"success": False, "is_token_die": True, "message": "Token DIE / Hết hạn"}
+                return {"success": False, "is_token_die": True, "message": "Token DIE ở Bước 2"}
 
             if "tạo quá nhiều Trang" in res2 or "tạo quá nhiều trang" in res2.lower() or "thử lại sau" in res2.lower():
-                return {"success": False, "is_limit": True, "message": "Gần đây bạn đã tạo quá nhiều Trang. Hãy thử lại sau."}
+                return {"success": False, "is_limit": True, "message": "Gần đây bạn đã tạo quá nhiều Trang."}
 
             if '"severity":"CRITICAL"' in res2 or "field_exception" in res2 or '"fb_bloks_action":null' in res2:
-                chk = self.get_user_info()
-                if not chk.get("success"):
-                    return {"success": False, "is_token_die": True, "message": f"Nick mẹ đã DIE / Checkpoint: {chk.get('message')}"}
-                else:
-                    return {"success": False, "is_restricted": True, "message": "Nick mẹ bị Facebook chặn tạo Page (CRITICAL)"}
+                return {"success": False, "is_restricted": True, "message": "Nick bị chặn tạo Page (CRITICAL)"}
 
-            page_ids = re.findall(r"\(bk\.action\.i64\.Const,\s*(\d{10,})\)", res2)
-
-            # Lấy token Page Pro5 qua me/accounts
-            acc_res = self.session.get(f"https://graph.facebook.com/me/accounts?access_token={self.token}", timeout=25).json()
-            created_page = None
-            if "data" in acc_res and isinstance(acc_res["data"], list):
-                for p in acc_res["data"]:
-                    if p.get("name") == page_name or str(p.get("id")) in page_ids:
-                        created_page = p
-                        break
-                if not created_page and acc_res["data"]:
-                    created_page = acc_res["data"][0]
-
-            if created_page:
-                return {
-                    "success": True,
-                    "page_id": str(created_page.get("id", "")),
-                    "page_name": str(created_page.get("name", page_name)),
-                    "page_token": str(created_page.get("access_token", "")),
-                    "mother_uid": self.mother_uid
-                }
-
-            if page_ids:
-                return {
-                    "success": True,
-                    "page_id": str(page_ids[-1]),
-                    "page_name": page_name,
-                    "page_token": "",
-                    "mother_uid": self.mother_uid
-                }
-
-            return {"success": False, "message": f"Không tìm thấy Page ID trong kết quả: {res2[:200]}"}
-
+            return {"success": True, "page_name": page_name}
         except Exception as e:
             return {"success": False, "message": f"Lỗi Bước 2: {e}"}
 
+    def transfer_page_to_holder_account(
+        self,
+        page_id: str,
+        page_token: str,
+        holder_info: Dict[str, str],
+        additional_profile_id: str = ""
+    ) -> Dict[str, Any]:
+        """
+        Chuyển quyền Admin Page vừa tạo sang Acc Cầm Page (nếu người dùng cấu hình).
+        Nếu có cả Token của Acc Cầm Page -> Tự động kết bạn 2 chiều & tự động nhận Admin.
+        """
+        holder_uid = str(holder_info.get("uid", "")).strip()
+        holder_token = str(holder_info.get("token", "")).strip()
+
+        # Nếu chỉ nạp Token Acc Cầm Page mà chưa rõ UID -> tự lấy UID của Acc Cầm Page
+        if not holder_uid and holder_token:
+            try:
+                r_h = self.session.get(
+                    f"https://graph.facebook.com/me?fields=id&access_token={holder_token}",
+                    headers={"User-Agent": self.user_agent},
+                    timeout=15
+                ).json()
+                holder_uid = str(r_h.get("id", ""))
+                holder_info["uid"] = holder_uid
+            except Exception:
+                pass
+
+        if not holder_uid:
+            return {"success": False, "message": "Không xác định được UID Acc Cầm Page"}
+
+        # 1. Kết bạn 2 chiều giữa Nick Reg và Acc Cầm Page để mở khóa mời Admin Pro5
+        try:
+            self.session.post(
+                f"https://graph.facebook.com/me/friends/{holder_uid}",
+                data={"access_token": self.token},
+                headers={"User-Agent": self.user_agent},
+                timeout=15
+            )
+            if holder_token and self.mother_uid:
+                self.session.post(
+                    f"https://graph.facebook.com/me/friends/{self.mother_uid}",
+                    data={"access_token": holder_token},
+                    headers={"User-Agent": self.user_agent},
+                    timeout=15
+                )
+        except Exception:
+            pass
+
+        # 2. Gửi lời mời Admin từ Nick Reg sang Acc Cầm Page
+        invited_ok = False
+        for tk in [page_token, self.token]:
+            if not tk:
+                continue
+            try:
+                r_role = self.session.post(
+                    f"https://graph.facebook.com/v19.0/{page_id}/roles",
+                    data={
+                        "user": holder_uid,
+                        "role": "ADMIN",
+                        "admin_tier": "BASIC_ADMIN",
+                        "access_token": tk
+                    },
+                    headers={"User-Agent": self.user_agent},
+                    timeout=20
+                ).json()
+                if r_role is True or r_role.get("success") is True:
+                    invited_ok = True
+                    break
+            except Exception:
+                pass
+
+        if not invited_ok:
+            active_tk = page_token or self.token
+            try:
+                variables = {
+                    "input": {
+                        "additional_profile_id": str(additional_profile_id or page_id),
+                        "page_id": str(page_id),
+                        "invitee_id": str(holder_uid),
+                        "admin_type": "FULL_ADMIN",
+                        "actor_id": str(additional_profile_id or self.mother_uid or page_id),
+                        "client_mutation_id": str(uuid.uuid4())
+                    }
+                }
+                gql_data = {
+                    "method": "post",
+                    "pretty": "false",
+                    "format": "json",
+                    "server_timestamps": "true",
+                    "locale": "vi_VN",
+                    "fb_api_req_friendly_name": "ProfilePlusCoreAdminInviteMutation",
+                    "fb_api_caller_class": "graphservice",
+                    "variables": json.dumps(variables),
+                    "client_trace_id": str(uuid.uuid4())
+                }
+                r_gql = self.session.post(
+                    GRAPHQL_URL,
+                    headers=self._get_headers("ProfilePlusCoreAdminInviteMutation", token_override=active_tk),
+                    data=gql_data,
+                    timeout=20
+                )
+                if r_gql.status_code == 200 and '"errors":' not in r_gql.text:
+                    invited_ok = True
+            except Exception:
+                pass
+
+        # 3. Nếu có Token của Acc Cầm Page -> Tự động Accept lời mời làm Admin
+        if holder_token:
+            try:
+                accept_vars = {
+                    "input": {
+                        "page_id": str(page_id),
+                        "actor_id": str(holder_uid),
+                        "client_mutation_id": str(uuid.uuid4())
+                    }
+                }
+                accept_data = {
+                    "method": "post",
+                    "pretty": "false",
+                    "format": "json",
+                    "server_timestamps": "true",
+                    "locale": "vi_VN",
+                    "fb_api_req_friendly_name": "ProfilePlusAdminInviteAcceptMutation",
+                    "fb_api_caller_class": "graphservice",
+                    "variables": json.dumps(accept_vars),
+                    "client_trace_id": str(uuid.uuid4())
+                }
+                self.session.post(
+                    GRAPHQL_URL,
+                    headers=self._get_headers("ProfilePlusAdminInviteAcceptMutation", token_override=holder_token),
+                    data=accept_data,
+                    timeout=20
+                )
+                return {"success": True, "message": f"Đã bắn & nhận Page bên Acc Cầm Page ({holder_uid})"}
+            except Exception:
+                pass
+
+        return {"success": True, "message": f"Đã chuyển quyền sang Acc Cầm Page ({holder_uid})"}
+
 
 # ==============================================================================
-# 9. GIAO DIỆN & TIẾN TRÌNH ĐA LUỒNG
+# 9. GIAO DIỆN & TIẾN TRÌNH XỬ LÝ: REG XONG 1 ACC -> ĐỢI 20S -> CHECK TOKEN
 # ==============================================================================
 
 class AccountTask:
-    def __init__(self, acc_id: int, item: Dict[str, Any], target_pages: int, ua_mode: str, assigned_proxy: Optional[str] = None):
+    def __init__(
+        self,
+        acc_id: int,
+        item: Dict[str, Any],
+        target_pages: int,
+        ua_mode: str,
+        assigned_proxy: Optional[str] = None,
+        assigned_holder: Optional[Dict[str, str]] = None
+    ):
         self.acc_id = acc_id
         self.token = item.get("token", "")
         self.proxy = item.get("proxy") or assigned_proxy
+        self.holder_info = assigned_holder or {}
         self.target_pages = target_pages
         self.pages_created = 0
-        self.next_available_time = 0.0
         self.ua_mode = ua_mode
         self.fixed_ua = generate_random_katana_ua(seed=self.token) if ua_mode == "fixed" else None
         self.creator = FbPageCreator(token=self.token, proxy=self.proxy, user_agent=self.fixed_ua, ua_mode=ua_mode)
         self.pre_uid = item.get("uid") or ""
         self.mother_uid = self.pre_uid
         self.mother_name = ""
-        self.is_initialized = False
-        self.status = "ready"  # ready, running, done, limit, die
+        self.status = "ready"  # ready, running, waiting_20s, done, no_page, limit, die
         self.current_action = "Chờ đến lượt..."
         self.last_result = ""
 
 
-class RoundRobinPool:
-    def __init__(self, accounts: List[AccountTask]):
-        self.accounts = accounts
-        self.lock = threading.Lock()
-        self.stop_event = threading.Event()
-
-    def get_account_for_work(self) -> Optional[AccountTask]:
-        while not self.stop_event.is_set():
-            with self.lock:
-                now = time.time()
-                all_done = True
-
-                for acc in self.accounts:
-                    if acc.status in ("done", "limit", "die"):
-                        continue
-                    all_done = False
-
-                    if acc.status == "ready":
-                        if acc.next_available_time <= now:
-                            acc.status = "running"
-                            return acc
-
-                if all_done:
-                    return None
-
-            time.sleep(0.5)
-
-        return None
-
-    def release_account(self, acc: AccountTask, status: str, cooldown_seconds: float = 0.0):
-        with self.lock:
-            acc.status = status
-            if status == "ready":
-                acc.next_available_time = time.time() + cooldown_seconds
-
-
 def render_dashboard(accounts: List[AccountTask], stats: Dict[str, int], total_threads: int):
-    now = time.time()
     lines = []
-    w = 104
+    w = 110
     lines.append(f"{Colors.BOLD}{Colors.CYAN}" + "=" * w + f"{Colors.RESET}")
-    lines.append(f"{Colors.BOLD}{Colors.YELLOW}             BẢNG THEO DÕI TIẾN ĐỘ REG PAGE PRO5 (REAL-TIME DASHBOARD)         {Colors.RESET}")
+    lines.append(f"{Colors.BOLD}{Colors.YELLOW}         BẢNG THEO DÕI: REG XONG 1 ACC -> ĐỢI 20S CHECK LẠI TOKEN -> CHUYỂN SANG ACC CẦM PAGE         {Colors.RESET}")
     lines.append(f"{Colors.BOLD}{Colors.CYAN}" + "=" * w + f"{Colors.RESET}")
-    lines.append(f"{Colors.BOLD} STT | UID              | Tên Nick         | Tiến độ | Trạng thái / Hành động hiện tại{Colors.RESET}")
+    lines.append(f"{Colors.BOLD} STT | UID              | Tên Nick         | Page Có | Trạng thái / Hành động hiện tại{Colors.RESET}")
     lines.append("-" * w)
 
     for acc in accounts:
@@ -794,37 +910,30 @@ def render_dashboard(accounts: List[AccountTask], stats: Dict[str, int], total_t
         prog_padded = f"{prog_str:^7}"
 
         if acc.status == "done":
-            status_display = f"{Colors.GREEN}🎉 Hoàn thành đủ {acc.target_pages}/{acc.target_pages} Page!{Colors.RESET}"
+            status_display = f"{Colors.GREEN}✅ {acc.last_result}{Colors.RESET}"
+        elif acc.status == "no_page":
+            status_display = f"{Colors.MAGENTA}⚠️ {acc.current_action}{Colors.RESET}"
         elif acc.status == "die":
-            status_display = f"{Colors.RED}❌ {acc.current_action or 'Nick mẹ DIE / Token hỏng (Đã dừng)'}{Colors.RESET}"
+            status_display = f"{Colors.RED}❌ {acc.current_action}{Colors.RESET}"
         elif acc.status == "limit":
-            status_display = f"{Colors.YELLOW}🚫 {acc.current_action or 'Bị Limit Facebook (Đã dừng)'}{Colors.RESET}"
+            status_display = f"{Colors.YELLOW}🚫 {acc.current_action}{Colors.RESET}"
+        elif acc.status == "waiting_20s":
+            status_display = f"{Colors.YELLOW}⏳ {acc.current_action}{Colors.RESET}"
         elif acc.status == "running":
             status_display = f"{Colors.CYAN}🟢 {acc.current_action}{Colors.RESET}"
-        elif acc.status == "ready":
-            if acc.next_available_time > now:
-                rem = max(1, int(acc.next_available_time - now))
-                if acc.last_result:
-                    status_display = f"{Colors.GREEN}✅ {acc.last_result} -> {Colors.YELLOW}⏳ Nghỉ ({rem}s){Colors.RESET}"
-                else:
-                    status_display = f"{Colors.YELLOW}⏳ Đang nghỉ delay (còn {rem}s){Colors.RESET}"
-            else:
-                if acc.last_result:
-                    status_display = f"{Colors.GREEN}✅ {acc.last_result} (Sẵn sàng reg tiếp){Colors.RESET}"
-                else:
-                    status_display = f"{Colors.BLUE}⏸️ Sẵn sàng reg tiếp...{Colors.RESET}"
         else:
-            status_display = f"{acc.current_action}"
+            status_display = f"{Colors.BLUE}⏸️ {acc.current_action}{Colors.RESET}"
 
         lines.append(f" {stt_str}| {uid_str} | {name_str} | {prog_padded} | {status_display}")
 
     lines.append("-" * w)
     lines.append(
-        f" {Colors.BOLD}[THỐNG KÊ]{Colors.RESET} Tổng nick: {len(accounts)} | "
-        f"Tạo thành công: {Colors.GREEN}{stats.get('total_success', 0)}{Colors.RESET} Page | "
+        f" {Colors.BOLD}[THỐNG KÊ]{Colors.RESET} Tổng Acc: {len(accounts)} | "
+        f"Acc Cầm Page (Có Page): {Colors.GREEN}{stats.get('total_holder_acc', 0)}{Colors.RESET} "
+        f"({Colors.GREEN}{stats.get('total_pages', 0)}{Colors.RESET} Page) | "
+        f"Ko lên Page: {Colors.MAGENTA}{stats.get('total_no_page', 0)}{Colors.RESET} | "
         f"Limit: {Colors.YELLOW}{stats.get('total_limited', 0)}{Colors.RESET} | "
-        f"Nick DIE: {Colors.RED}{stats.get('total_token_die', 0)}{Colors.RESET} | "
-        f"Số luồng: {total_threads}"
+        f"Acc DIE: {Colors.RED}{stats.get('total_token_die', 0)}{Colors.RESET}"
     )
     lines.append(f"{Colors.BOLD}{Colors.CYAN}" + "=" * w + f"{Colors.RESET}")
 
@@ -841,19 +950,194 @@ def dashboard_render_loop(accounts: List[AccountTask], stats: Dict[str, int], to
     render_dashboard(accounts, stats, total_threads)
 
 
-def add_log(msg: str):
-    pass
+def process_single_account_workflow(
+    thread_id: int,
+    acc: AccountTask,
+    name_type: str,
+    custom_names: Optional[List[str]],
+    verify_delay: int,
+    delay_between_pages: int,
+    stats: Dict[str, int]
+):
+    """
+    Xử lý trọn vẹn 1 Acc theo đúng quy trình:
+    1. Kiểm tra Token ban đầu.
+    2. Thực hiện Reg xong 1 Acc (tạo đủ số lượng Page yêu cầu trên Acc đó).
+    3. Đợi đếm ngược 20s (`verify_delay`).
+    4. Check lại Token lần nữa để kiểm tra xem còn sống không & có Page trong `me/accounts` không.
+    5. Nếu CÓ PAGE -> Chuyển sang Acc Cầm Page (Lưu vào `acc_cam_page.txt` & bắn sang Acc Cầm Page nếu có).
+    """
+    acc.status = "running"
+    acc.current_action = f"[L{thread_id}] Đang kiểm tra Token ban đầu..."
+
+    # Bước 1: Kiểm tra Token trước khi reg và ghi nhận số Page cũ (nếu có)
+    pre_check = acc.creator.check_token_and_get_pages()
+    if not pre_check.get("success"):
+        if pre_check.get("is_token_die"):
+            acc.status = "die"
+            acc.mother_uid = acc.pre_uid or "Unknown"
+            acc.mother_name = "Nick DIE / Checkpoint"
+            acc.current_action = "Token DIE ngay từ đầu -> Đã lưu acc_die.txt"
+            with FILE_LOCK:
+                stats["total_token_die"] += 1
+                with open("acc_die.txt", "a", encoding="utf-8") as f:
+                    f.write(f"{acc.mother_uid}|{acc.token}|DIE_TRUOC_KHI_REG\n")
+            return
+        else:
+            acc.status = "die"
+            acc.current_action = f"Lỗi kết nối: {str(pre_check.get('message'))[:30]}"
+            return
+
+    acc.mother_uid = pre_check.get("uid") or acc.creator.mother_uid or acc.pre_uid or "Unknown"
+    user_info = acc.creator.get_user_info()
+    acc.mother_name = user_info.get("name", "Facebook User")
+
+    # Bước 2: Tiến hành Reg xong 1 Acc
+    attempted_any = False
+    hit_limit = False
+    hit_restricted = False
+
+    for idx in range(1, acc.target_pages + 1):
+        page_name = get_page_name(name_type, custom_names)
+        acc.current_action = f"[L{thread_id}] Đang reg Page ({idx}/{acc.target_pages}): '{page_name}'..."
+
+        reg_res = acc.creator.send_create_page_request(page_name=page_name)
+
+        if reg_res.get("is_token_die"):
+            acc.status = "die"
+            acc.current_action = "Token bị DIE trong lúc đang bấm Reg -> Lưu acc_die.txt"
+            with FILE_LOCK:
+                stats["total_token_die"] += 1
+                with open("acc_die.txt", "a", encoding="utf-8") as f:
+                    f.write(f"{acc.mother_uid}|{acc.token}|DIE_KHI_REG\n")
+            return
+
+        if reg_res.get("is_limit"):
+            hit_limit = True
+            break
+
+        if reg_res.get("is_restricted"):
+            hit_restricted = True
+            break
+
+        attempted_any = True
+
+        # Nếu reg nhiều hơn 1 page trên 1 acc thì nghỉ ngắn giữa các lần bấm
+        if idx < acc.target_pages and delay_between_pages > 0:
+            for s_rem in range(delay_between_pages, 0, -1):
+                acc.current_action = f"[L{thread_id}] Đợi {s_rem}s để reg tiếp Page ({idx + 1}/{acc.target_pages})..."
+                time.sleep(1)
+
+    # Nếu chưa tạo được gì mà dính Limit hoặc chặn ngay lập tức (nhưng vẫn sẽ check lại sau 20s nếu đã gửi lệnh)
+    if not attempted_any and (hit_limit or hit_restricted):
+        if hit_limit:
+            acc.status = "limit"
+            acc.current_action = "Acc bị Limit tạo Page -> Đã bỏ qua"
+            with FILE_LOCK:
+                stats["total_limited"] += 1
+            return
+        if hit_restricted:
+            acc.status = "no_page"
+            acc.current_action = "Acc bị Facebook chặn reg Page (CRITICAL)"
+            with FILE_LOCK:
+                stats["total_no_page"] += 1
+            return
+
+    # Bước 3: KHI REG XONG 1 ACC -> ĐỢI ĐẾM NGƯỢC TẦM 20S
+    acc.status = "waiting_20s"
+    wait_seconds = max(1, int(verify_delay))
+    for rem in range(wait_seconds, 0, -1):
+        acc.current_action = f"[L{thread_id}] Đã reg xong Acc -> Đợi {rem}s rồi check lại Token kiểm tra Page..."
+        time.sleep(1)
+
+    # Bước 4: HẾT 20S -> CHECK LẠI TOKEN ĐỂ KIỂM TRA XEM CÓ PAGE KHÔNG
+    acc.status = "running"
+    acc.current_action = f"[L{thread_id}] Đang check lại Token & kiểm tra danh sách Page..."
+
+    post_check = acc.creator.check_token_and_get_pages()
+    if not post_check.get("success"):
+        if post_check.get("is_token_die"):
+            acc.status = "die"
+            acc.current_action = f"Check lại sau {wait_seconds}s: Token đã DIE / Checkpoint!"
+            with FILE_LOCK:
+                stats["total_token_die"] += 1
+                with open("acc_die.txt", "a", encoding="utf-8") as f:
+                    f.write(f"{acc.mother_uid}|{acc.token}|DIE_SAU_20S\n")
+            return
+        else:
+            acc.status = "no_page"
+            acc.current_action = f"Lỗi khi check lại Token: {str(post_check.get('message'))[:30]}"
+            return
+
+    pages_now = post_check.get("pages", [])
+
+    # Bước 5: KIỂM TRA CÓ PAGE THÌ CHUYỂN SANG ACC CẦM PAGE
+    if not pages_now:
+        acc.status = "no_page"
+        acc.current_action = f"Check lại sau {wait_seconds}s: KHÔNG CÓ PAGE -> Lưu acc_reg_xit.txt"
+        with FILE_LOCK:
+            stats["total_no_page"] += 1
+            with open("acc_reg_xit.txt", "a", encoding="utf-8") as f:
+                f.write(f"{acc.mother_uid}|{acc.token}|KHONG_CO_PAGE_SAU_20S\n")
+        return
+
+    # XÁC NHẬN CÓ PAGE TRONG NICK SAU KHI CHECK LẠI TOKEN!
+    acc.pages_created = len(pages_now)
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    page_summary_list = []
+    transfer_note = "Đã chuyển vào acc_cam_page.txt"
+
+    for p in pages_now:
+        p_id = str(p.get("id", ""))
+        p_name = str(p.get("name", ""))
+        p_token = str(p.get("access_token", ""))
+        add_prof_id = str(p.get("additional_profile_id", ""))
+        page_summary_list.append(f"{p_id}:{p_name}")
+
+        # Nếu có cấu hình bắn quyền sang một Acc Cầm Page riêng biệt
+        if acc.holder_info and (acc.holder_info.get("uid") or acc.holder_info.get("token")):
+            acc.current_action = f"[L{thread_id}] Có Page {p_id} -> Đang chuyển sang Acc Cầm Page..."
+            tr_res = acc.creator.transfer_page_to_holder_account(
+                page_id=p_id,
+                page_token=p_token,
+                holder_info=acc.holder_info,
+                additional_profile_id=add_prof_id
+            )
+            transfer_note = tr_res.get("message", "Đã chuyển sang Acc Cầm Page")
+
+    # Lưu sang file Acc Cầm Page (acc_cam_page.txt) và created_pages.txt
+    with FILE_LOCK:
+        stats["total_holder_acc"] += 1
+        stats["total_pages"] += len(pages_now)
+
+        for p in pages_now:
+            p_id = str(p.get("id", ""))
+            p_name = str(p.get("name", ""))
+            p_token = str(p.get("access_token", ""))
+            holder_uid_str = acc.holder_info.get("uid", "") if acc.holder_info else ""
+
+            with open("created_pages.txt", "a", encoding="utf-8") as f_page:
+                f_page.write(f"{p_id}|{p_name}|{p_token}|{acc.mother_uid}|{now_str}\n")
+
+            with open("acc_cam_page.txt", "a", encoding="utf-8") as f_holder:
+                if holder_uid_str:
+                    f_holder.write(f"{acc.mother_uid}|{acc.token}|{p_id}|{p_name}|{p_token}|CHUYEN_SANG:{holder_uid_str}|{now_str}\n")
+                else:
+                    f_holder.write(f"{acc.mother_uid}|{acc.token}|{p_id}|{p_name}|{p_token}|ACC_CAM_PAGE|{now_str}\n")
+
+    acc.status = "done"
+    first_page_str = ", ".join(page_summary_list[:2])
+    acc.last_result = f"Check sau {wait_seconds}s CÓ {len(pages_now)} PAGE ({first_page_str}) -> {transfer_note}"
+    acc.current_action = acc.last_result
 
 
-def worker_reg_page_sequential(
+def worker_reg_account(
     thread_id: int,
     queue: Queue,
     name_type: str,
     custom_names: Optional[List[str]],
-    pages_per_nick: int,
+    verify_delay: int,
     delay_between_pages: int,
-    limit_action: int,
-    limit_delay_seconds: int,
     stats: Dict[str, int]
 ):
     while True:
@@ -863,225 +1147,29 @@ def worker_reg_page_sequential(
             break
 
         try:
-            acc.status = "running"
-            acc.current_action = f"[L{thread_id}] Đang kiểm tra nick mẹ..."
-
-            user_info = acc.creator.get_user_info()
-            if not user_info.get("success"):
-                if user_info.get("is_token_die") or "OAuthException" in str(user_info) or "die" in str(user_info).lower():
-                    acc.status = "die"
-                    acc.mother_uid = user_info.get("uid") or acc.pre_uid or "Unknown"
-                    acc.mother_name = "Nick DIE / Checkpoint"
-                    acc.current_action = "Nick mẹ đã DIE / Token hỏng -> Đã dừng nick"
-                    with FILE_LOCK:
-                        stats["total_token_die"] += 1
-                    queue.task_done()
-                    # Chuyển ngay sang nick tiếp theo trong hàng đợi
-                    continue
-                else:
-                    acc.current_action = f"[L{thread_id}] Lỗi mạng: {str(user_info.get('message'))[:25]}"
-                    queue.task_done()
-                    continue
-
-            acc.mother_uid = user_info.get("uid", acc.pre_uid or "Unknown")
-            acc.mother_name = user_info.get("name", "Facebook User")
-            acc.is_initialized = True
-
-            while acc.pages_created < acc.target_pages:
-                cur_idx = acc.pages_created + 1
-                page_name = get_page_name(name_type, custom_names)
-                acc.current_action = f"[L{thread_id}] Đang reg ({cur_idx}/{acc.target_pages}): '{page_name}'..."
-
-                res = acc.creator.create_page(page_name=page_name)
-
-                if res.get("success"):
-                    p_id = res.get("page_id", "")
-                    p_token = res.get("page_token", "")
-                    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-                    out_line = f"{p_id}|{page_name}|{p_token}|{acc.mother_uid}|{now_str}\n"
-                    with FILE_LOCK:
-                        with open("created_pages.txt", "a", encoding="utf-8") as f:
-                            f.write(out_line)
-                        stats["total_success"] += 1
-
-                    acc.pages_created += 1
-                    acc.last_result = f"Tạo '{page_name}' (ID: {p_id})"
-
-                    if acc.pages_created < acc.target_pages:
-                        acc.status = "ready"
-                        acc.next_available_time = time.time() + delay_between_pages
-                        time.sleep(delay_between_pages)
-                        acc.status = "running"
-                else:
-                    if res.get("is_token_die"):
-                        acc.status = "die"
-                        acc.current_action = "Nick mẹ đã DIE / Token hỏng -> Đã dừng nick"
-                        with FILE_LOCK:
-                            stats["total_token_die"] += 1
-                        break
-
-                    elif res.get("is_restricted"):
-                        acc.status = "die"
-                        acc.current_action = "Bị Facebook chặn tạo Page -> Đã dừng nick"
-                        with FILE_LOCK:
-                            stats["total_token_die"] += 1
-                        break
-
-                    elif res.get("is_limit"):
-                        with FILE_LOCK:
-                            stats["total_limited"] += 1
-                        if limit_action == 1:
-                            acc.status = "limit"
-                            acc.current_action = "Bị Limit tạo Page -> Đã dừng nick"
-                            break
-                        else:
-                            acc.status = "ready"
-                            acc.next_available_time = time.time() + limit_delay_seconds
-                            time.sleep(limit_delay_seconds)
-                            acc.status = "running"
-                    else:
-                        err_msg = res.get("message", "Thất bại")[:40]
-                        acc.current_action = f"Lỗi: {err_msg}"
-                        chk = acc.creator.get_user_info()
-                        if not chk.get("success") and chk.get("is_token_die"):
-                            acc.status = "die"
-                            acc.current_action = "Nick mẹ đã DIE -> Đã dừng nick"
-                            with FILE_LOCK:
-                                stats["total_token_die"] += 1
-                            break
-                        time.sleep(5)
-
-            if acc.pages_created >= acc.target_pages:
-                acc.status = "done"
-                acc.current_action = f"Đã hoàn thành {acc.target_pages} Page"
-
-            queue.task_done()
+            process_single_account_workflow(
+                thread_id=thread_id,
+                acc=acc,
+                name_type=name_type,
+                custom_names=custom_names,
+                verify_delay=verify_delay,
+                delay_between_pages=delay_between_pages,
+                stats=stats
+            )
         except Exception as e:
-            acc.current_action = f"Lỗi luồng: {str(e)[:30]}"
+            acc.status = "die"
+            acc.current_action = f"Lỗi ngoại lệ: {str(e)[:35]}"
+        finally:
             queue.task_done()
-            time.sleep(1)
-
-
-def worker_reg_page_round_robin(
-    thread_id: int,
-    pool: RoundRobinPool,
-    name_type: str,
-    custom_names: Optional[List[str]],
-    delay_between_pages: int,
-    limit_action: int,
-    limit_delay_seconds: int,
-    stats: Dict[str, int]
-):
-    while True:
-        acc = pool.get_account_for_work()
-        if not acc:
-            break
-
-        try:
-            if not acc.is_initialized:
-                acc.current_action = f"[L{thread_id}] Đang kiểm tra nick mẹ..."
-                user_info = acc.creator.get_user_info()
-
-                if not user_info.get("success"):
-                    if user_info.get("is_token_die") or "OAuthException" in str(user_info) or "die" in str(user_info).lower():
-                        acc.status = "die"
-                        acc.mother_uid = user_info.get("uid") or acc.pre_uid or "Unknown"
-                        acc.mother_name = "Nick DIE / Checkpoint"
-                        acc.current_action = "Nick mẹ đã DIE / Token hỏng -> Đã dừng nick"
-                        with FILE_LOCK:
-                            stats["total_token_die"] += 1
-                        pool.release_account(acc, status="die")
-                        # CHUYỂN NGAY SANG NICK TIẾP THEO
-                        continue
-                    else:
-                        acc.current_action = f"[L{thread_id}] Lỗi mạng: {str(user_info.get('message'))[:25]}"
-                        pool.release_account(acc, status="ready", cooldown_seconds=10)
-                        continue
-
-                acc.mother_uid = user_info.get("uid", acc.pre_uid or "Unknown")
-                acc.mother_name = user_info.get("name", "Facebook User")
-                acc.is_initialized = True
-
-            cur_idx = acc.pages_created + 1
-            page_name = get_page_name(name_type, custom_names)
-            acc.current_action = f"[L{thread_id}] Đang reg ({cur_idx}/{acc.target_pages}): '{page_name}'..."
-
-            res = acc.creator.create_page(page_name=page_name)
-
-            if res.get("success"):
-                p_id = res.get("page_id", "")
-                p_token = res.get("page_token", "")
-                now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-                out_line = f"{p_id}|{page_name}|{p_token}|{acc.mother_uid}|{now_str}\n"
-                with FILE_LOCK:
-                    with open("created_pages.txt", "a", encoding="utf-8") as f:
-                        f.write(out_line)
-                    stats["total_success"] += 1
-
-                acc.pages_created += 1
-                acc.last_result = f"Tạo '{page_name}' (ID: {p_id})"
-
-                if acc.pages_created >= acc.target_pages:
-                    acc.status = "done"
-                    acc.current_action = f"Đã hoàn thành {acc.target_pages} Page"
-                    pool.release_account(acc, status="done")
-                else:
-                    acc.current_action = f"Nghỉ delay {delay_between_pages}s (chuyển nick khác...)"
-                    pool.release_account(acc, status="ready", cooldown_seconds=delay_between_pages)
-
-            else:
-                if res.get("is_token_die"):
-                    acc.status = "die"
-                    acc.current_action = "Nick mẹ đã DIE / Token hỏng -> Đã dừng nick"
-                    with FILE_LOCK:
-                        stats["total_token_die"] += 1
-                    pool.release_account(acc, status="die")
-
-                elif res.get("is_restricted"):
-                    acc.status = "die"
-                    acc.current_action = "Bị Facebook chặn tạo Page -> Đã dừng nick"
-                    with FILE_LOCK:
-                        stats["total_token_die"] += 1
-                    pool.release_account(acc, status="die")
-
-                elif res.get("is_limit"):
-                    with FILE_LOCK:
-                        stats["total_limited"] += 1
-
-                    if limit_action == 1:
-                        acc.status = "limit"
-                        acc.current_action = "Bị Limit tạo Page -> Đã dừng nick"
-                        pool.release_account(acc, status="limit")
-                    else:
-                        acc.current_action = f"Nghỉ chống limit {limit_delay_seconds}s rồi thử lại"
-                        pool.release_account(acc, status="ready", cooldown_seconds=limit_delay_seconds)
-                else:
-                    err_msg = res.get("message", "Thất bại")[:40]
-                    acc.current_action = f"Lỗi: {err_msg}"
-                    chk = acc.creator.get_user_info()
-                    if not chk.get("success") and chk.get("is_token_die"):
-                        acc.status = "die"
-                        acc.current_action = "Nick mẹ đã DIE -> Đã dừng nick"
-                        with FILE_LOCK:
-                            stats["total_token_die"] += 1
-                        pool.release_account(acc, status="die")
-                    else:
-                        pool.release_account(acc, status="ready", cooldown_seconds=10)
-        except Exception as e:
-            acc.current_action = f"Lỗi luồng: {str(e)[:30]}"
-            pool.release_account(acc, status="ready", cooldown_seconds=10)
-            time.sleep(1)
 
 
 def run_reg_page_menu():
     print_banner()
-    safe_print(f"{Colors.BOLD}{Colors.MAGENTA}=== CẤU HÌNH REG PAGE PRO5 ĐA LUỒNG ==={Colors.RESET}\n")
+    safe_print(f"{Colors.BOLD}{Colors.MAGENTA}=== CẤU HÌNH: REG XONG 1 ACC -> ĐỢI 20S CHECK LẠI TOKEN -> ACC CẦM PAGE ==={Colors.RESET}\n")
 
     # 1. Nạp token
-    safe_print(f"{Colors.CYAN}--- [1/8] NẠP DANH SÁCH TOKEN EAAAAU ---{Colors.RESET}")
-    safe_print("[1] Dán trực tiếp vào màn hình (tự động nhận diện EAAAAU)")
+    safe_print(f"{Colors.CYAN}--- [1/7] NẠP DANH SÁCH TOKEN EAAAAU CẦN REG ---{Colors.RESET}")
+    safe_print("[1] Dán trực tiếp vào màn hình (tự động lọc EAAAAU)")
     safe_print("[2] Đọc từ file tokens.txt")
     c_tok = input("Chọn cách nạp token (1 hoặc 2, mặc định 1): ").strip() or "1"
 
@@ -1104,10 +1192,31 @@ def run_reg_page_menu():
         input("\nNhấn Enter để quay lại...")
         return
 
-    safe_print(f"{Colors.GREEN}{Colors.BOLD} Đã nhận diện: {len(parsed_items)} Token EAAAAU hợp lệ!{Colors.RESET}\n")
+    safe_print(f"{Colors.GREEN}{Colors.BOLD}Đã nhận diện: {len(parsed_items)} Acc (Token EAAAAU) hợp lệ!{Colors.RESET}\n")
 
-    # 2. Tên Page
-    safe_print(f"{Colors.CYAN}--- [2/8] CHỌN LOẠI TÊN PAGE ---{Colors.RESET}")
+    # 2. Chế độ chuyển sang Acc Cầm Page
+    safe_print(f"{Colors.CYAN}--- [2/7] CẤU HÌNH CHUYỂN SANG ACC CẦM PAGE KHI KIỂM TRA CÓ PAGE ---{Colors.RESET}")
+    safe_print("[1] Tự động chuyển Acc có Page sang file riêng `acc_cam_page.txt` (Phân loại Acc Cầm Page)")
+    safe_print("[2] Vừa lưu `acc_cam_page.txt`, vừa bắn quyền Admin Page sang một Acc Cầm Page (UID / Token) khác")
+    c_holder = input("Chọn chế độ (1 hoặc 2, mặc định 1): ").strip() or "1"
+
+    holder_list: List[Dict[str, str]] = []
+    if c_holder == "2":
+        safe_print("Nhập UID hoặc Token EAAAAU của Acc Cầm Page (nhập nhiều dòng hoặc cách nhau bởi dấu phẩy):")
+        h_raw = input("UID / Token Acc Cầm Page: ").strip()
+        for part in re.split(r"[,;]+", h_raw):
+            parsed_h = parse_holder_line(part)
+            if parsed_h:
+                holder_list.append(parsed_h)
+        if holder_list:
+            safe_print(f"{Colors.GREEN}Đã nhận {len(holder_list)} Acc Cầm Page để nhận quyền Admin!{Colors.RESET}\n")
+        else:
+            safe_print(f"{Colors.YELLOW}Không nhập UID nhận -> Tự động lưu phân loại vào acc_cam_page.txt.{Colors.RESET}\n")
+    else:
+        safe_print(f"{Colors.GREEN}Đã chọn: Kiểm tra có Page -> Chuyển Acc sang `acc_cam_page.txt`.{Colors.RESET}\n")
+
+    # 3. Tên Page
+    safe_print(f"{Colors.CYAN}--- [3/7] CHỌN LOẠI TÊN PAGE ---{Colors.RESET}")
     safe_print("[1] Tên Việt thuần 100% (Ví dụ: Nguyễn Văn Khải, Trần Thị Mai...)")
     safe_print("[2] Tên Ngoại / US (Ví dụ: Sophia Davis, David Miller...)")
     safe_print("[3] Tự nạp danh sách tên từ file names.txt")
@@ -1130,16 +1239,16 @@ def run_reg_page_menu():
 
     safe_print(f"{Colors.GREEN}Chế độ tên: {name_type.upper()}{Colors.RESET}\n")
 
-    # 3. User-Agent
-    safe_print(f"{Colors.CYAN}--- [3/8] CƠ CHẾ USER-AGENT (KATANA ANDROID) ---{Colors.RESET}")
-    safe_print("[1] Cố định 1 UA cho mỗi nick (1 nick dùng 1 UA duy nhất cho mọi page - Khuyên dùng)")
-    safe_print("[2] Random UA mới mỗi lần tạo Page (Mỗi page tạo ra dùng 1 UA Katana mới ngẫu nhiên)")
+    # 4. User-Agent
+    safe_print(f"{Colors.CYAN}--- [4/7] CƠ CHẾ USER-AGENT (KATANA ANDROID) ---{Colors.RESET}")
+    safe_print("[1] Cố định 1 UA cho mỗi nick [Khuyên dùng]")
+    safe_print("[2] Random UA mới mỗi lần tạo Page")
     c_ua = input("Chọn cơ chế UA (1 hoặc 2, mặc định 1): ").strip() or "1"
     ua_mode = "random" if c_ua == "2" else "fixed"
-    safe_print(f"{Colors.GREEN}Cơ chế UA: {'Random UA mới cho mỗi Page' if ua_mode == 'random' else 'Cố định 1 UA duy nhất cho mỗi Nick'}{Colors.RESET}\n")
+    safe_print("")
 
-    # 4. Proxy
-    safe_print(f"{Colors.CYAN}--- [4/8] CẤU HÌNH PROXY ---{Colors.RESET}")
+    # 5. Proxy
+    safe_print(f"{Colors.CYAN}--- [5/7] CẤU HÌNH PROXY ---{Colors.RESET}")
     global_proxies = []
     has_attached = any(it.get("proxy") for it in parsed_items)
 
@@ -1166,71 +1275,64 @@ def run_reg_page_menu():
         else:
             safe_print(f"{Colors.YELLOW}Chạy trực tiếp mạng máy tính / 4G của điện thoại.{Colors.RESET}\n")
 
-    # 5. Số page & Delay
-    safe_print(f"{Colors.CYAN}--- [5/8] SỐ LƯỢNG PAGE & NGHỈ DELAY ---{Colors.RESET}")
+    # 6. Số page trên 1 acc & Thời gian đợi 20s check lại Token
+    safe_print(f"{Colors.CYAN}--- [6/7] SỐ PAGE TRÊN 1 ACC & THỜI GIAN ĐỢI CHECK LẠI TOKEN ---{Colors.RESET}")
     try:
-        pages_per_nick = int(input("Số lượng Page muốn reg trên 1 nick (Mặc định 1): ").strip() or "1")
+        pages_per_nick = int(input("Số lượng Page muốn reg trên 1 Acc (Mặc định 1): ").strip() or "1")
     except ValueError:
         pages_per_nick = 1
 
     try:
-        delay_between = int(input("Thời gian nghỉ trước khi reg page tiếp theo (giây, mặc định 10): ").strip() or "10")
+        verify_delay = int(input("Sau khi reg xong 1 Acc, đợi bao nhiêu giây để check lại Token kiểm tra Page? (Mặc định 20): ").strip() or "20")
     except ValueError:
-        delay_between = 10
-    safe_print("")
+        verify_delay = 20
 
-    # 6. Chế độ điều phối nick
-    safe_print(f"{Colors.CYAN}--- [6/8] CHẾ ĐỘ ĐIỀU PHỐI TÀI KHOẢN KHI REG ---{Colors.RESET}")
-    safe_print("[1] Tuần tự từng nick (Mỗi luồng hoàn thành xong nick này mới sang nick khác)")
-    safe_print("[2] Xoay vòng nick / Round-Robin (Reg 1 page xong chuyển sang nick khác ngay, tận dụng thời gian nghỉ delay - Tối ưu tốc độ) [Khuyên dùng]")
-    c_dispatch = input("Chọn chế độ (1 hoặc 2, mặc định 2): ").strip() or "2"
-    run_mode = "sequential" if c_dispatch == "1" else "round_robin"
-    safe_print(f"{Colors.GREEN}Chế độ điều phối: {'Xoay vòng nick (Round-Robin)' if run_mode == 'round_robin' else 'Tuần tự từng nick'}{Colors.RESET}\n")
-
-    # 7. Xử lý Limit
-    safe_print(f"{Colors.CYAN}--- [7/8] XỬ LÝ KHI BỊ LIMIT TẠO PAGE ---{Colors.RESET}")
-    safe_print("[1] Dừng tạo trên nick đó ngay lập tức (Bảo vệ nick mẹ tránh DIE) [Khuyên dùng]")
-    safe_print("[2] Cho nick nghỉ thêm thời gian rồi thử lại")
-    limit_action = input("Chọn cách xử lý (1 hoặc 2, mặc định 1): ").strip() or "1"
-    limit_delay = 300
-    if limit_action == "2":
+    delay_between = 5
+    if pages_per_nick > 1:
         try:
-            limit_delay = int(input("Số giây nghỉ khi bị limit (Mặc định 300s): ").strip() or "300")
+            delay_between = int(input("Thời gian nghỉ giữa các Page trong cùng 1 Acc (giây, mặc định 5): ").strip() or "5")
         except ValueError:
-            limit_delay = 300
-    limit_action_num = 2 if limit_action == "2" else 1
+            delay_between = 5
     safe_print("")
 
-    # 8. Luồng
-    safe_print(f"{Colors.CYAN}--- [8/8] SỐ LUỒNG CHẠY SONG SONG ---{Colors.RESET}")
+    # 7. Luồng
+    safe_print(f"{Colors.CYAN}--- [7/7] SỐ LUỒNG CHẠY SONG SONG ---{Colors.RESET}")
     try:
         num_threads = int(input(f"Nhập số luồng (Mặc định {min(3, len(parsed_items))}): ").strip() or str(min(3, len(parsed_items))))
     except ValueError:
         num_threads = 3
     num_threads = max(1, min(num_threads, 50))
 
-    input(f"\n{Colors.BOLD}{Colors.YELLOW}Bấm Enter để BẮT ĐẦU CHẠY REG PAGE...{Colors.RESET}")
-    safe_print("\n" + "=" * 72)
-    safe_print(f"{Colors.GREEN}{Colors.BOLD} TIẾN TRÌNH REG PAGE PRO5 BẮT ĐẦU HOẠT ĐỘNG ({run_mode.upper()})...{Colors.RESET}")
-    safe_print("=" * 72 + "\n")
+    input(f"\n{Colors.BOLD}{Colors.YELLOW}Bấm Enter để BẮT ĐẦU CHẠY...{Colors.RESET}")
 
-    stats = {"total_success": 0, "total_limited": 0, "total_token_die": 0}
+    stats = {
+        "total_holder_acc": 0,
+        "total_pages": 0,
+        "total_no_page": 0,
+        "total_limited": 0,
+        "total_token_die": 0
+    }
     actual_threads = min(num_threads, len(parsed_items))
     worker_threads = []
     stop_dashboard = threading.Event()
 
     account_tasks = []
+    task_queue = Queue()
+
     for idx, it in enumerate(parsed_items):
         assigned_px = global_proxies[idx % len(global_proxies)] if global_proxies and not it.get("proxy") else None
-        account_tasks.append(AccountTask(
+        assigned_holder = holder_list[idx % len(holder_list)] if holder_list else None
+        task_obj = AccountTask(
             acc_id=idx + 1,
             item=it,
             target_pages=pages_per_nick,
             ua_mode=ua_mode,
-            assigned_proxy=assigned_px
-        ))
+            assigned_proxy=assigned_px,
+            assigned_holder=assigned_holder
+        )
+        account_tasks.append(task_obj)
+        task_queue.put(task_obj)
 
-    # Bật Dashboard theo dõi trạng thái Real-time
     dashboard_thread = threading.Thread(
         target=dashboard_render_loop,
         args=(account_tasks, stats, actual_threads, stop_dashboard),
@@ -1238,52 +1340,31 @@ def run_reg_page_menu():
     )
     dashboard_thread.start()
 
-    if run_mode == "round_robin":
-        pool = RoundRobinPool(account_tasks)
-        for t_id in range(1, actual_threads + 1):
-            t = threading.Thread(
-                target=worker_reg_page_round_robin,
-                args=(
-                    t_id, pool, name_type, custom_names,
-                    delay_between, limit_action_num, limit_delay, stats
-                ),
-                daemon=True
-            )
-            worker_threads.append(t)
-            t.start()
-
-    else:
-        task_queue = Queue()
-        for acc in account_tasks:
-            task_queue.put(acc)
-
-        for t_id in range(1, actual_threads + 1):
-            t = threading.Thread(
-                target=worker_reg_page_sequential,
-                args=(
-                    t_id, task_queue, name_type, custom_names, pages_per_nick,
-                    delay_between, limit_action_num, limit_delay, stats
-                ),
-                daemon=True
-            )
-            worker_threads.append(t)
-            t.start()
+    for t_id in range(1, actual_threads + 1):
+        t = threading.Thread(
+            target=worker_reg_account,
+            args=(t_id, task_queue, name_type, custom_names, verify_delay, delay_between, stats),
+            daemon=True
+        )
+        worker_threads.append(t)
+        t.start()
 
     for t in worker_threads:
         t.join()
 
-    # Tắt dashboard và hiển thị tổng kết
     stop_dashboard.set()
     dashboard_thread.join(timeout=1.5)
     render_dashboard(account_tasks, stats, actual_threads)
 
-    safe_print("\n" + "=" * 72)
-    safe_print(f"{Colors.GREEN}{Colors.BOLD} HOÀN TẤT TIẾN TRÌNH REG PAGE!{Colors.RESET}")
-    safe_print(f"- Số Page tạo thành công: {Colors.GREEN}{stats['total_success']}{Colors.RESET}")
-    safe_print(f"- Số nick gặp Limit: {Colors.YELLOW}{stats['total_limited']}{Colors.RESET}")
-    safe_print(f"- Số nick bị Token DIE / Bị chặn: {Colors.RED}{stats['total_token_die']}{Colors.RESET}")
-    safe_print(f"- Kết quả đã lưu tại: {Colors.CYAN}created_pages.txt{Colors.RESET}")
-    safe_print("=" * 72 + "\n")
+    safe_print("\n" + "=" * 78)
+    safe_print(f"{Colors.GREEN}{Colors.BOLD} HOÀN TẤT TIẾN TRÌNH!{Colors.RESET}")
+    safe_print(f"- Số Acc kiểm tra sau {verify_delay}s CÓ PAGE (Đã chuyển sang Acc Cầm Page): {Colors.GREEN}{stats['total_holder_acc']} Acc ({stats['total_pages']} Page){Colors.RESET}")
+    safe_print(f"- Số Acc reg xong nhưng check sau {verify_delay}s KHÔNG có Page: {Colors.MAGENTA}{stats['total_no_page']}{Colors.RESET}")
+    safe_print(f"- Số Acc gặp Limit: {Colors.YELLOW}{stats['total_limited']}{Colors.RESET}")
+    safe_print(f"- Số Acc bị Token DIE / Checkpoint: {Colors.RED}{stats['total_token_die']}{Colors.RESET}")
+    safe_print(f"- File Acc Cầm Page (Acc sống & có Page): {Colors.CYAN}acc_cam_page.txt{Colors.RESET}")
+    safe_print(f"- File chi tiết Page tạo ra: {Colors.CYAN}created_pages.txt{Colors.RESET}")
+    safe_print("=" * 78 + "\n")
     input("Nhấn Enter để quay lại menu chính...")
 
 
@@ -1370,12 +1451,12 @@ def run_get_token_menu():
     for t in worker_threads:
         t.join()
 
-    safe_print("\n" + "=" * 72)
+    safe_print("\n" + "=" * 78)
     safe_print(f"{Colors.GREEN}{Colors.BOLD} HOÀN TẤT LẤY TOKEN EAAAAU!{Colors.RESET}")
     safe_print(f"- Lấy thành công: {Colors.GREEN}{stats['success']}{Colors.RESET}")
     safe_print(f"- Thất bại: {Colors.RED}{stats['fail']}{Colors.RESET}")
     safe_print(f"- Đã lưu file: {Colors.CYAN}tokens_eaaau.txt{Colors.RESET}")
-    safe_print("=" * 72 + "\n")
+    safe_print("=" * 78 + "\n")
     input("Nhấn Enter để quay lại menu chính...")
 
 
@@ -1383,7 +1464,7 @@ def main():
     while True:
         print_banner()
         safe_print(f"{Colors.BOLD}VUI LÒNG CHỌN CHỨC NĂNG:{Colors.RESET}")
-        safe_print(f"{Colors.GREEN}[1] REG PAGE PRO5 HÀNG LOẠT (ĐA LUỒNG){Colors.RESET}")
+        safe_print(f"{Colors.GREEN}[1] REG PAGE PRO5 (REG XONG 1 ACC -> ĐỢI 20S CHECK TOKEN -> ACC CẦM PAGE){Colors.RESET}")
         safe_print(f"{Colors.YELLOW}[2] GET TOKEN EAAAAU TỪ TÀI KHOẢN (UID|PASS|2FA){Colors.RESET}")
         safe_print(f"{Colors.RED}[0] THOÁT TOOL{Colors.RESET}\n")
 
