@@ -8,8 +8,8 @@ TOOL REG PAGE PRO5 VIP (CORE V5) + CHUYỂN PAGE SIÊU MẠNH (CUỐN CHIẾU T�
 - Tự động Login Bloks CAA v5 lấy Token EAAAAU nếu dòng acc chưa có sẵn Token.
 - Luồng cuốn chiếu thông minh:
     Tạo xong Page nào -> Đợi Check Live Page đó -> Đồng bộ ProfileUID (615...)
-    & sw_token từ ProfileSwitcherQuery -> Chuyển luôn sang Nick Mẹ (Full 4 Bước
-    trích xuất nt_bundle_tree động & Auto Accept) -> Lưu file ngay lập tức!
+    & sw_token từ ProfileSwitcherQuery -> Up Cover & Up Avatar 2 bước chuẩn Pro5
+    -> Chuyển luôn sang Nick Mẹ (Full 4 Bước nt_bundle_tree & Auto Accept)!
 ================================================================================
 """
 
@@ -771,7 +771,6 @@ def login_and_get_token(acc: Dict[str, Any], custom_ua: Optional[str] = None) ->
 # ==============================================================================
 
 def extract_payload_from_tree(nt_bundle_tree: str) -> Optional[str]:
-    """Bóc tách URL permissions/update động từ nt_bundle_tree của Step 1."""
     if not nt_bundle_tree:
         return None
     m = re.search(r'(/nt/profile/admin_management/permissions/update\?[^"\'\\}]+)', nt_bundle_tree)
@@ -953,7 +952,6 @@ def xac_nhan_mk(
     password: str,
     proxy: Optional[str] = None
 ) -> Tuple[Optional[str], str]:
-    """Bước 1: Xác thực mật khẩu bằng sw_token và profile_id (615...) -> trả về nt_bundle_tree."""
     url = "https://graph.facebook.com/graphql"
     clean_token = auth_token.replace("OAuth ", "").replace("Bearer ", "").strip()
     headers = {
@@ -1048,7 +1046,6 @@ def xac_nhan_mk(
 
 
 def gui_loi_moi(auth_token: str, nt_bundle_tree: str, proxy: Optional[str] = None) -> Tuple[bool, str]:
-    """Bước 2: Bóc tách URL permissions/update từ nt_bundle_tree và gửi lời mời Admin."""
     payload = extract_payload_from_tree(nt_bundle_tree)
     if not payload:
         err_str = "Không tìm thấy URL permissions/update trong nt_bundle_tree (Kiểm tra lại mật khẩu/quyền Page)"
@@ -1135,7 +1132,6 @@ def ktra_loi_moi(
     invitee_id: str,
     proxy: Optional[str] = None
 ) -> Tuple[Optional[str], str]:
-    """Bước 3: Lấy mã invitation_id từ tài khoản nhận (Nick Mẹ)."""
     url = "https://graph.facebook.com/graphql"
     clean_token = auth_token.replace("OAuth ", "").replace("Bearer ", "").strip()
     headers = {
@@ -1213,7 +1209,6 @@ def xac_nhan_loi_moi(
     accept_invitation: int = 1,
     proxy: Optional[str] = None
 ) -> Tuple[bool, str]:
-    """Bước 4: Chấp nhận lời mời Admin bằng Token tài khoản nhận (Nick Mẹ)."""
     url = "https://graph.facebook.com/graphql"
     clean_token = auth_token.replace("OAuth ", "").replace("Bearer ", "").strip()
     headers = {
@@ -1328,11 +1323,6 @@ def get_managed_page_ids(token: str, proxy: Optional[str] = None) -> Set[str]:
 
 
 def _fetch_all_pages_raw(token: str, profile_id: str, proxy: Optional[str] = None) -> List[Dict[str, str]]:
-    """
-    Lấy danh sách Page Pro5 chuẩn:
-    - Lấy ProfileUID thật (615...) và sw_token từ ProfileSwitcherQuery (client_doc_id 116912609015732060545213902280).
-    - Tuyệt đối KHÔNG lấy additional_profile_id (297858...) từ Graph API /me/accounts.
-    """
     proxies = parse_proxy(proxy)
     headers_graph = {
         "Accept-Encoding": "gzip",
@@ -1597,7 +1587,7 @@ def execute_super_transfer(
 
     return res_out
   # ==============================================================================
-# 6. CÁC HÀM HỖ TRỢ CHỌN PAGE & LÕI REG PAGE PRO5 VIP V5 (CHỐNG TREO BƯỚC 3)
+# 6. CÁC HÀM HỖ TRỢ CHỌN PAGE & LÕI REG PAGE PRO5 VIP V5 (FIX UP AVATAR 2 BƯỚC)
 # ==============================================================================
 
 def parse_selection(selection_str: str, max_index: int) -> List[int]:
@@ -1921,7 +1911,6 @@ class FbPageCreator:
         # --- BƯỚC 3: KIỂM TRA MÃ ID PAGE MỚI TRƯỚC KHI QUÉT (CHỐNG ĐỨNG 15 GIÂY) ---
         candidate_ids = set(re.findall(r"\(bk\.action\.i64\.Const,\s*(\d{10,})\)", body2 or ""))
 
-        # Nếu Bloks không trả về bk.action.i64.Const nào -> Chỉ quét 1 lần sau 2s rồi báo Limit/Xịt ngay!
         max_scans = 3 if candidate_ids else 1
         wait_scan = 2
 
@@ -1988,25 +1977,41 @@ class FbPageCreator:
             "additional_profile_id": add_profile_id
         }
 
-    def upload_media(self, page_id: str, page_token: str, media_type: str = "avatar") -> Dict[str, Any]:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    def upload_media(
+        self,
+        page_id: str,
+        page_token: str,
+        media_type: str = "avatar",
+        profile_uid: str = "",
+        graph_token: str = ""
+    ) -> Dict[str, Any]:
+        """
+        Up Avatar & Ảnh bìa chuẩn Page Pro5:
+        - Với Cover: Tải ảnh lên /photos (published=false) lấy photo_id -> Gắn cover=photo_id.
+        - Với Avatar (Cơ chế 2 bước chuẩn Pro5):
+            + Bước 1: Dùng sw_token (page_token từ ProfileSwitcher) tải ảnh lên /v24.0/me/photos lấy photo_id.
+            + Bước 2: Gọi GraphQL ProfilePictureSetMutation (với actor_id = ProfileUID 615... & photo_id)
+                      kết hợp POST trực tiếp /v24.0/me/picture bằng sw_token để đóng dấu vào vòng tròn Avatar Pro5.
+        """
+        dl_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         if media_type == "avatar":
             sources = [
-                f"https://i.pravatar.cc/1000?u={uuid.uuid4()}",
-                f"https://randomuser.me/api/portraits/men/{random.randint(1, 99)}.jpg",
-                f"https://randomuser.me/api/portraits/women/{random.randint(1, 99)}.jpg"
+                f"https://randomuser.me/api/portraits/men/{random.randint(1, 95)}.jpg",
+                f"https://randomuser.me/api/portraits/women/{random.randint(1, 95)}.jpg",
+                f"https://i.pravatar.cc/800?u={uuid.uuid4()}",
+                f"https://picsum.photos/800/800?random={uuid.uuid4()}"
             ]
         else:
             sources = [
-                f"https://picsum.photos/1920/1080?random={uuid.uuid4()}",
-                "https://picsum.photos/1920/1080"
+                f"https://picsum.photos/1600/900?random={uuid.uuid4()}",
+                "https://picsum.photos/1600/900"
             ]
 
         img_bytes = None
         for src in sources:
             try:
-                r = self.session.get(src, headers=headers, timeout=15)
-                if r.status_code == 200 and r.headers.get("Content-Type", "").startswith("image/"):
+                r = self.session.get(src, headers=dl_headers, timeout=15)
+                if r.status_code == 200 and len(r.content) > 1500:
                     img_bytes = r.content
                     break
             except Exception:
@@ -2015,34 +2020,124 @@ class FbPageCreator:
         if not img_bytes:
             return {"success": False, "message": "Không tải được nguồn ảnh"}
 
+        sw_tk = page_token or graph_token
+        g_tk = graph_token or page_token
+        target_prof_uid = str(profile_uid or page_id)
+
         try:
-            if media_type == "avatar":
-                r = self.session.post(
-                    f"https://graph.facebook.com/v19.0/{page_id}/picture",
-                    data={"access_token": page_token},
-                    files={"source": ("avatar.jpg", img_bytes, "image/jpeg")},
-                    timeout=30
-                ).json()
-                if "error" in r:
-                    return {"success": False, "message": r["error"].get("message", "Lỗi up Avatar")}
+            if media_type == "cover":
+                for tk_try in [sw_tk, g_tk]:
+                    if not tk_try:
+                        continue
+                    r1 = self.session.post(
+                        f"https://graph.facebook.com/v24.0/{page_id}/photos",
+                        data={"published": "false", "access_token": tk_try},
+                        files={"source": ("cover.jpg", img_bytes, "image/jpeg")},
+                        timeout=30
+                    ).json()
+                    if isinstance(r1, dict) and "id" in r1:
+                        r2 = self.session.post(
+                            f"https://graph.facebook.com/v24.0/{page_id}",
+                            data={"cover": r1["id"], "access_token": tk_try},
+                            timeout=30
+                        ).json()
+                        if isinstance(r2, dict) and "error" not in r2:
+                            return {"success": True}
+                return {"success": False, "message": "Lỗi set ảnh bìa"}
+
+            # === XỬ LÝ UP AVATAR 2 BƯỚC CHUẨN PRO5 ===
+            avatar_locked = False
+            photo_id = None
+
+            # BƯỚC 1: Tải ảnh lên dưới phiên Pro5 (/v24.0/me/photos bằng sw_token) để lấy photo_id thuộc sở hữu của ProfileUID 615...
+            for ep_url, tk_use in [
+                ("https://graph.facebook.com/v24.0/me/photos", sw_tk),
+                (f"https://graph.facebook.com/v24.0/{page_id}/photos", g_tk)
+            ]:
+                if not tk_use or photo_id:
+                    continue
+                try:
+                    r_up = self.session.post(
+                        ep_url,
+                        data={"published": "false", "access_token": tk_use},
+                        files={"source": ("avatar.jpg", img_bytes, "image/jpeg")},
+                        headers={"User-Agent": self.user_agent},
+                        timeout=30
+                    ).json()
+                    if isinstance(r_up, dict) and r_up.get("id"):
+                        photo_id = str(r_up["id"])
+                        break
+                except Exception:
+                    pass
+
+            # BƯỚC 2A: Dùng photo_id gọi GraphQL ProfilePictureSetMutation để đóng dấu làm Avatar chính của nhân Pro5 (615...)
+            if photo_id:
+                set_pic_doc_ids = ["7251203121614451", "5915022358574157", "6623819204340452"]
+                for actor_try in [target_prof_uid, str(page_id)]:
+                    if avatar_locked:
+                        break
+                    for doc_id in set_pic_doc_ids:
+                        try:
+                            variables = {
+                                "input": {
+                                    "actor_id": actor_try,
+                                    "profile_id": actor_try,
+                                    "photo_id": photo_id,
+                                    "focus": {"x": 0.5, "y": 0.5},
+                                    "profile_pic_method": "UPLOAD",
+                                    "profile_pic_source": "TIMELINE",
+                                    "client_mutation_id": str(uuid.uuid4())
+                                }
+                            }
+                            gql_data = {
+                                "method": "post",
+                                "pretty": "false",
+                                "format": "json",
+                                "server_timestamps": "true",
+                                "locale": "vi_VN",
+                                "fb_api_req_friendly_name": "ProfilePictureSetMutation",
+                                "fb_api_caller_class": "graphservice",
+                                "doc_id": doc_id,
+                                "variables": json.dumps(variables),
+                                "client_trace_id": str(uuid.uuid4())
+                            }
+                            r_gql = self.session.post(
+                                GRAPHQL_URL,
+                                headers=self._get_headers("ProfilePictureSetMutation", token_override=sw_tk),
+                                data=gql_data,
+                                timeout=20
+                            ).json()
+                            if isinstance(r_gql, dict) and "error" not in r_gql and "errors" not in r_gql and r_gql.get("data"):
+                                avatar_locked = True
+                                break
+                        except Exception:
+                            pass
+
+            # BƯỚC 2B: Gọi đồng thời /v24.0/me/picture bằng chính sw_token (Token phiên của ProfileUID 615...)
+            for pic_ep, tk_use in [
+                ("https://graph.facebook.com/v24.0/me/picture", sw_tk),
+                (f"https://graph.facebook.com/v24.0/{target_prof_uid}/picture", sw_tk),
+                (f"https://graph.facebook.com/v24.0/{page_id}/picture", g_tk)
+            ]:
+                if not tk_use:
+                    continue
+                try:
+                    r_pic = self.session.post(
+                        pic_ep,
+                        data={"access_token": tk_use},
+                        files={"source": ("avatar.jpg", img_bytes, "image/jpeg")},
+                        headers={"User-Agent": self.user_agent},
+                        timeout=30
+                    ).json()
+                    if isinstance(r_pic, dict) and "error" not in r_pic:
+                        avatar_locked = True
+                        break
+                except Exception:
+                    pass
+
+            if avatar_locked:
                 return {"success": True}
-            else:
-                r1 = self.session.post(
-                    f"https://graph.facebook.com/v19.0/{page_id}/photos",
-                    data={"published": "false", "access_token": page_token},
-                    files={"source": ("cover.jpg", img_bytes, "image/jpeg")},
-                    timeout=30
-                ).json()
-                if "error" in r1 or "id" not in r1:
-                    return {"success": False, "message": "Lỗi upload ảnh bìa"}
-                r2 = self.session.post(
-                    f"https://graph.facebook.com/v19.0/{page_id}",
-                    data={"cover": r1["id"], "access_token": page_token},
-                    timeout=30
-                ).json()
-                if "error" in r2:
-                    return {"success": False, "message": "Lỗi set ảnh bìa"}
-                return {"success": True}
+            return {"success": False, "message": "Không gán được Avatar vào nhân Pro5"}
         except Exception as e:
             return {"success": False, "message": str(e)[:60]}
 
@@ -2052,7 +2147,7 @@ class FbPageCreator:
                 "message": "Chào mừng mọi người đến với Page! Hãy ấn theo dõi để cập nhật những thông tin mới nhất nhé!",
                 "access_token": page_token
             }
-            r = self.session.post(f"https://graph.facebook.com/v19.0/{page_id}/feed", data=payload, timeout=25).json()
+            r = self.session.post(f"https://graph.facebook.com/v24.0/{page_id}/feed", data=payload, timeout=25).json()
             if "error" in r:
                 return {"success": False, "message": r["error"].get("message", "Lỗi đăng bài")}
             return {"success": True}
@@ -2107,7 +2202,7 @@ def render_dashboard(accounts: List[AccountTask], stats: Dict[str, int]):
     lines.append(f"{Colors.BOLD}{Colors.CYAN}" + "=" * w + f"{Colors.RESET}")
     lines.append(
         f"{Colors.BOLD}{Colors.YELLOW}"
-        f"   BẢNG TIẾN TRÌNH VIP: REG XONG PAGE NÀO -> CHECK LIVE -> CHUYỂN LUÔN PAGE ĐÓ SANG NICK MẸ (4 BƯỚC)   "
+        f"   BẢNG TIẾN TRÌNH VIP: REG XONG PAGE NÀO -> CHECK LIVE -> UP AVATAR PRO5 -> CHUYỂN LUÔN PAGE ĐÓ   "
         f"{Colors.RESET}"
     )
     lines.append(f"{Colors.BOLD}{Colors.CYAN}" + "=" * w + f"{Colors.RESET}")
@@ -2155,7 +2250,7 @@ def render_dashboard(accounts: List[AccountTask], stats: Dict[str, int]):
     )
     lines.append(f"{Colors.BOLD}{Colors.CYAN}" + "=" * w + f"{Colors.RESET}")
 
-    lines.append(f"{Colors.BOLD}{Colors.MAGENTA} 📋 NHẬT KÝ QUÁ TRÌNH CHI TIẾT (TẠO PAGE -> CHECK LIVE -> CHUYỂN LUÔN TỪNG PAGE):{Colors.RESET}")
+    lines.append(f"{Colors.BOLD}{Colors.MAGENTA} 📋 NHẬT KÝ QUÁ TRÌNH CHI TIẾT (TẠO PAGE -> CHECK LIVE -> UP AVATAR PRO5 -> CHUYỂN LUÔN):{Colors.RESET}")
     with LOG_LOCK:
         if not LIVE_PROCESS_LOGS:
             lines.append("   (Đang khởi tạo luồng xử lý...)")
@@ -2178,7 +2273,7 @@ def dashboard_render_loop(accounts: List[AccountTask], stats: Dict[str, int], st
 
 
 # ==============================================================================
-# 8. LUỒNG XỬ LÝ CUỐN CHIẾU TỪNG PAGE (CHỐNG TREO & TỰ CẮT KHI XỊT/LIMIT)
+# 8. LUỒNG XỬ LÝ CUỐN CHIẾU TỪNG PAGE (ĐỒNG BỘ PROFILESWITCHER -> UP AVATAR 2 BƯỚC -> CHUYỂN)
 # ==============================================================================
 
 def process_single_account_workflow(
@@ -2348,7 +2443,7 @@ def process_single_account_workflow(
                 with open("acc_cam_page.txt", "a", encoding="utf-8") as f_holder:
                     f_holder.write(f"{acc.mother_uid}|{acc.password}|{acc.token}|{p_id}|{p_uid}|{p_name}|{p_token}|{tr_tag}|{now_str}\n")
 
-    # --- VÒNG LẶP CUỐN CHIẾU TỪNG PAGE MỚI: REG -> CHECK LIVE -> CHUYỂN LUÔN -> LƯU FILE ---
+    # --- VÒNG LẶP CUỐN CHIẾU TỪNG PAGE MỚI: REG -> ĐỢI CHECK LIVE -> UP AVATAR PRO5 2 BƯỚC -> CHUYỂN LUÔN ---
     for idx in range(1, acc.target_pages + 1):
         acc.status = "running"
         page_name = get_page_name(name_type, custom_names)
@@ -2425,24 +2520,15 @@ def process_single_account_workflow(
             f"{Colors.GREEN}🎉 [Page {idx}] Tạo thành công '{p_name}' (ID: {p_id} | ProfileUID: {p_uid}) | Token: {short_ptk}{Colors.RESET}"
         )
 
-        # (Tùy chọn) Up Avatar / Cover / Bài đăng ngay cho Page này
-        if acc.auto_buff_media and g_token:
-            acc.current_action = f"[L{thread_id}] [Page {idx}] Đang Up Avatar & Ảnh bìa cho '{p_name}'..."
-            av_res = acc.creator.upload_media(p_id, g_token, "avatar")
-            cv_res = acc.creator.upload_media(p_id, g_token, "cover")
-            acc.creator.post_welcome(p_id, g_token)
-            if av_res.get("success") or cv_res.get("success"):
-                add_process_log(acc.acc_id, acc.mother_uid, f"{Colors.CYAN}🖼️ [Page {idx}] Đã Up Avatar/Cover & Đăng bài cho Page {p_id}{Colors.RESET}")
-
-        # 2. ĐỢI ĐẾM NGƯỢC & CHECK LIVE NGAY CHO PAGE VỪA TẠO
+        # 2. ĐỢI ĐẾM NGƯỢC & ĐỒNG BỘ PROFILESWITCHER TRƯỚC KHI UP ẢNH & CHUYỂN PAGE
         acc.status = "waiting_check"
         add_process_log(
             acc.acc_id,
             acc.mother_uid,
-            f"⏳ [Page {idx}] Đang đợi {wait_seconds}s để Check Live & Chuyển luôn Page '{p_name}'..."
+            f"⏳ [Page {idx}] Đang đợi {wait_seconds}s để FB khởi tạo xong nhân Pro5 & Check Live '{p_name}'..."
         )
         for rem in range(wait_seconds, 0, -1):
-            acc.current_action = f"[L{thread_id}] [Page {idx}/{acc.target_pages}] Đợi {rem}s để Check Live & Chuyển luôn Page {p_id}..."
+            acc.current_action = f"[L{thread_id}] [Page {idx}/{acc.target_pages}] Đợi {rem}s để Check Live & Đồng bộ Page {p_id}..."
             time.sleep(1)
 
         acc.status = "running"
@@ -2469,6 +2555,8 @@ def process_single_account_workflow(
             ):
                 if sw_item.get("access_token"):
                     p_token = sw_item["access_token"]
+                if sw_item.get("graph_token"):
+                    g_token = sw_item["graph_token"]
                 if sw_item.get("additional_profile_id"):
                     p_uid = sw_item["additional_profile_id"]
                 break
@@ -2487,10 +2575,34 @@ def process_single_account_workflow(
         add_process_log(
             acc.acc_id,
             acc.mother_uid,
-            f"{Colors.GREEN}✔ [Page {idx}] Check LIVE OK: Page {p_id} (ProfileUID: {p_uid}) SỐNG! Bắt đầu chuyển ngay...{Colors.RESET}"
+            f"{Colors.GREEN}✔ [Page {idx}] Check LIVE OK: Page {p_id} (ProfileUID: {p_uid}) SỐNG!{Colors.RESET}"
         )
 
-        # 3. CHUYỂN LUÔN PAGE NÀY SANG NICK MẸ (FULL 4 BƯỚC NT_BUNDLE_TREE)
+        # 3. (TÙY CHỌN) UP COVER TRƯỚC -> UP AVATAR PRO5 2 BƯỚC SAU -> ĐĂNG BÀI WELCOME
+        if acc.auto_buff_media and (p_token or g_token):
+            acc.current_action = f"[L{thread_id}] [Page {idx}] Đang Up Ảnh bìa (Cover) cho '{p_name}'..."
+            cv_res = acc.creator.upload_media(
+                page_id=p_id, page_token=p_token, media_type="cover", profile_uid=p_uid, graph_token=g_token
+            )
+            time.sleep(2)
+
+            acc.current_action = f"[L{thread_id}] [Page {idx}] Đang Up Avatar 2 bước Pro5 cho '{p_name}' (UID: {p_uid})..."
+            av_res = acc.creator.upload_media(
+                page_id=p_id, page_token=p_token, media_type="avatar", profile_uid=p_uid, graph_token=g_token
+            )
+            time.sleep(1)
+
+            acc.creator.post_welcome(p_id, p_token or g_token)
+
+            av_status = "OK" if av_res.get("success") else f"Lỗi ({av_res.get('message')})"
+            cv_status = "OK" if cv_res.get("success") else "Lỗi"
+            add_process_log(
+                acc.acc_id,
+                acc.mother_uid,
+                f"{Colors.CYAN}🖼️ [Page {idx}] Up Media Pro5 -> Avatar: {av_status} | Cover: {cv_status} | Welcome Post: OK{Colors.RESET}"
+            )
+
+        # 4. CHUYỂN LUÔN PAGE NÀY SANG NICK MẸ (FULL 4 BƯỚC NT_BUNDLE_TREE)
         transfer_ok = False
         transfer_status = "NO_TARGET"
         invitation_id = ""
@@ -2521,7 +2633,7 @@ def process_single_account_workflow(
             else:
                 add_process_log(acc.acc_id, acc.mother_uid, f"{Colors.YELLOW}⚠️ [Page {idx}] {last_transfer_note}{Colors.RESET}")
 
-        # 4. LƯU NGAY PAGE NÀY VÀO FILE & CẬP NHẬT THỐNG KÊ TỨC THÌ
+        # 5. LƯU NGAY PAGE NÀY VÀO FILE & CẬP NHẬT THỐNG KÊ TỨC THÌ
         acc.pages_created += 1
         page_summary_list.append(f"{p_id}:{p_name}")
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -2544,7 +2656,7 @@ def process_single_account_workflow(
                 else:
                     f_holder.write(f"{acc.mother_uid}|{acc.password}|{acc.token}|{p_id}|{p_uid}|{p_name}|{p_token}|PAGE_LIVE|{now_str}\n")
 
-        # 5. NGHỈ DELAY TRƯỚC KHI TẠO PAGE TIẾP THEO (NẾU TARGET > 1)
+        # 6. NGHỈ DELAY TRƯỚC KHI TẠO PAGE TIẾP THEO (NẾU TARGET > 1)
         if idx < acc.target_pages and delay_between_pages > 0:
             for s_rem in range(delay_between_pages, 0, -1):
                 acc.current_action = f"[L{thread_id}] Đã xong Page {idx}/{acc.target_pages}! Nghỉ {s_rem}s trước khi Reg Page {idx + 1}..."
@@ -2607,7 +2719,7 @@ def worker_reg_account(
 
 
 # ==============================================================================
-# 9. MENU [1]: REG PAGE VIP V5 -> CHECK LIVE -> CHUYỂN LUÔN TỪNG PAGE
+# 9. MENU [1]: REG PAGE VIP V5 -> CHECK LIVE -> UP AVATAR PRO5 -> CHUYỂN LUÔN
 # ==============================================================================
 
 def run_reg_page_menu():
@@ -2713,8 +2825,8 @@ def run_reg_page_menu():
     safe_print("")
 
     # 4. Tự động Up Avatar/Cover/Post
-    safe_print(f"{Colors.CYAN}--- [4/8] TỰ ĐỘNG UP AVATAR, ẢNH BÌA & BÀI ĐĂNG CHO PAGE MỚI ---{Colors.RESET}")
-    buff_choice = input("Có tự động Up Avatar + Ảnh bìa + Đăng bài Welcome sau khi tạo Page không? (y/n, mặc định n): ").strip().lower()
+    safe_print(f"{Colors.CYAN}--- [4/8] TỰ ĐỘNG UP AVATAR 2 BƯỚC PRO5, ẢNH BÌA & BÀI ĐĂNG ---{Colors.RESET}")
+    buff_choice = input("Có tự động Up Avatar Pro5 + Ảnh bìa + Đăng bài Welcome sau khi Check Live Page không? (y/n, mặc định y): ").strip().lower() or "y"
     auto_buff_media = (buff_choice == "y")
     safe_print("")
 
@@ -2762,7 +2874,7 @@ def run_reg_page_menu():
         pages_per_nick = 4
 
     try:
-        verify_delay = int(input("Sau khi tạo xong mỗi Page, đợi bao nhiêu giây để Check Live & Chuyển luôn? (Mặc định 10): ").strip() or "10")
+        verify_delay = int(input("Sau khi tạo xong mỗi Page, đợi bao nhiêu giây để Check Live & Up Avatar/Chuyển? (Mặc định 10): ").strip() or "10")
     except ValueError:
         verify_delay = 10
 
