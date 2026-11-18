@@ -1586,8 +1586,8 @@ def execute_super_transfer(
         res_out["message"] = f"Đã mời (ID: {invitation_id}), lỗi bước 4: {msg4}"
 
     return res_out
-  # ==============================================================================
-# 6. CÁC HÀM HỖ TRỢ CHỌN PAGE & LÕI REG PAGE PRO5 VIP V5 (FIX UP AVATAR 2 BƯỚC)
+# ==============================================================================
+# 6. CÁC HÀM HỖ TRỢ CHỌN PAGE & LÕI REG PAGE PRO5 VIP V5 (TỰ BÓC FILE ẢNH / ZIP)
 # ==============================================================================
 
 def parse_selection(selection_str: str, max_index: int) -> List[int]:
@@ -1622,13 +1622,13 @@ def get_token_pages(token: str, profile_id: str, proxy: Optional[str] = None) ->
         logger.error("Không tìm thấy Page nào.")
         return []
 
-    safe_print("\nDanh sách Page có thể chuyển:")
+    safe_print(f"\n{Colors.CYAN}Danh sách {len(parsed)} Page đang cầm trên nick:{Colors.RESET}")
     for i, p in enumerate(parsed, 1):
-        safe_print(f"  [{i}] {p['name']} (Page ID: {p['page_id']} | ProfileUID: {p['additional_profile_id']})")
+        safe_print(f"  {Colors.YELLOW}[{i}]{Colors.RESET} {p['name']} (Page ID: {p['page_id']} | ProfileUID: {p['additional_profile_id']})")
 
     max_idx = len(parsed)
     while True:
-        choice = input("Chọn Page (ví dụ: 1-5, 1,3,5, hoặc all để chọn tất cả, q để thoát): ").strip()
+        choice = input("Chọn Page muốn chuyển (Enter hoặc 'all' = Chọn tất cả, VD: 1-5, 1,3,5, 'q' để hủy): ").strip() or "all"
         if choice.lower() == "q":
             return []
         indices = parse_selection(choice, max_idx)
@@ -1739,7 +1739,6 @@ class FbPageCreator:
         }
 
     def get_all_pages_with_tokens(self) -> Dict[str, Any]:
-        """Lấy danh sách Page từ _fetch_all_pages_raw (ưu tiên ProfileUID 615... & sw_token từ ProfileSwitcher)."""
         try:
             raw_list = _fetch_all_pages_raw(self.token, self.mother_uid, proxy=self.proxy)
             pages = []
@@ -1756,10 +1755,6 @@ class FbPageCreator:
             return {"success": False, "is_token_die": False, "pages": [], "message": str(e)}
 
     def check_single_page_live(self, page_id: str, page_token: str) -> Dict[str, Any]:
-        """
-        Kiểm tra Page còn sống (LIVE) sau thời gian chờ.
-        TUYỆT ĐỐI KHÔNG query 'additional_profile_id' từ Graph API để tránh lấy nhầm ID ảo 297858...
-        """
         tk_to_check = page_token or self.token
         try:
             url = (
@@ -1783,7 +1778,6 @@ class FbPageCreator:
 
     @staticmethod
     def _decode_fb_body(resp: requests.Response) -> str:
-        """Giải mã toàn bộ chuỗi Unicode Escape (\\uXXXX) trong JSON GraphQL để bắt chính xác lỗi tiếng Việt."""
         raw_text = resp.text or ""
         try:
             decoded_json = json.dumps(resp.json(), ensure_ascii=False)
@@ -1800,14 +1794,9 @@ class FbPageCreator:
         known_page_ids: set,
         step_callback=None
     ) -> Dict[str, Any]:
-        """
-        Tạo Page Pro5 chuẩn Katana + Kiểm tra ngay bk.action.i64.Const ở Bước 2.
-        Nếu Facebook từ chối cấp ID Page mới -> Báo Limit/Xịt ngay trong 2 giây, không treo 15-20s.
-        """
         if self.ua_mode == "random":
             self.user_agent = generate_random_katana_ua()
 
-        # --- BƯỚC 1: SUBMIT TÊN PAGE ---
         if step_callback:
             step_callback(f"Bước 1/2: Đang gửi tên Page '{page_name}'...")
 
@@ -1852,7 +1841,6 @@ class FbPageCreator:
         except Exception as e:
             return {"success": False, "message": f"Lỗi mạng Bước 1: {e}"}
 
-        # --- BƯỚC 2: SUBMIT CATEGORY & KHỞI TẠO PAGE ---
         if step_callback:
             step_callback(f"Bước 2/2: Đang chọn Hạng mục & Khởi tạo Page '{page_name}'...")
 
@@ -1908,9 +1896,7 @@ class FbPageCreator:
         except Exception as e:
             return {"success": False, "message": f"Lỗi mạng Bước 2: {e}"}
 
-        # --- BƯỚC 3: KIỂM TRA MÃ ID PAGE MỚI TRƯỚC KHI QUÉT (CHỐNG ĐỨNG 15 GIÂY) ---
         candidate_ids = set(re.findall(r"\(bk\.action\.i64\.Const,\s*(\d{10,})\)", body2 or ""))
-
         max_scans = 3 if candidate_ids else 1
         wait_scan = 2
 
@@ -1977,54 +1963,159 @@ class FbPageCreator:
             "additional_profile_id": add_profile_id
         }
 
+    def _get_image_from_local_repo(self, media_type: str = "avatar", custom_path: str = "") -> Tuple[Optional[bytes], str]:
+        """
+        Tự động nhận diện và bóc tách ảnh từ mọi loại file người dùng đưa vào:
+        1. File nén (.zip): Tự động đọc ngầm bên trong file .zip và bốc ngẫu nhiên 1 ảnh (không cần giải nén).
+        2. File ảnh đơn (.jpg, .jpeg, .png, .webp): Tự lấy ảnh đó và biến đổi mã MD5 mỗi lần up.
+        3. File văn bản (.txt): Tự bóc tách các link ảnh (http/https) hoặc đường dẫn ảnh bên trong.
+        4. Không truyền gì: Tự động quét ngay thư mục chứa file code (.py), thư mục 'avatars', 'covers'
+           để tìm bất kỳ file .zip hoặc file ảnh nào đang có sẵn và lấy ra dùng luôn.
+        """
+        import zipfile
+
+        valid_img_exts = (".jpg", ".jpeg", ".png", ".webp")
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+
+        clean_path = (custom_path or "").strip().strip('"').strip("'")
+        if clean_path.startswith("& "):
+            clean_path = clean_path[2:].strip().strip('"').strip("'")
+
+        def _salt_image_bytes(raw_data: bytes) -> bytes:
+            return raw_data + os.urandom(random.randint(12, 32))
+
+        def _extract_from_zip(zip_filepath: str) -> Tuple[Optional[bytes], str]:
+            try:
+                with zipfile.ZipFile(zip_filepath, "r") as zf:
+                    img_names = [
+                        name for name in zf.namelist()
+                        if name.lower().endswith(valid_img_exts)
+                        and not os.path.basename(name).startswith((".", "_"))
+                    ]
+                    if not img_names:
+                        return None, f"Trong file {os.path.basename(zip_filepath)} không có ảnh (.jpg/.png)"
+                    chosen_name = random.choice(img_names)
+                    raw_bytes = zf.read(chosen_name)
+                    if len(raw_bytes) > 1000:
+                        return _salt_image_bytes(raw_bytes), f"{os.path.basename(zip_filepath)} -> {os.path.basename(chosen_name)}"
+            except Exception as e:
+                return None, f"Lỗi bóc file zip: {e}"
+            return None, "Ảnh trong zip bị rỗng"
+
+        def _extract_from_txt(txt_filepath: str) -> Tuple[Optional[bytes], str]:
+            try:
+                with open(txt_filepath, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                urls = re.findall(r"(https?://[^\s|\"'<>]+)", content)
+                local_lines = [
+                    ln.strip().strip('"').strip("'")
+                    for ln in content.splitlines()
+                    if ln.strip() and not ln.strip().startswith("#") and os.path.isfile(ln.strip().strip('"').strip("'"))
+                ]
+                if local_lines:
+                    p_chosen = random.choice(local_lines)
+                    with open(p_chosen, "rb") as img_f:
+                        return _salt_image_bytes(img_f.read()), os.path.basename(p_chosen)
+                if urls:
+                    random.shuffle(urls)
+                    for u in urls[:5]:
+                        try:
+                            r = self.session.get(u, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+                            if r.status_code == 200 and len(r.content) > 1000:
+                                return _salt_image_bytes(r.content), u[:35]
+                        except Exception:
+                            continue
+            except Exception as e:
+                return None, f"Lỗi đọc file txt: {e}"
+            return None, "Không lấy được ảnh từ file txt"
+
+        # --- TRƯỜNG HỢP 1: NGƯỜI DÙNG CHỈ ĐỊNH TRỰC TIẾP 1 FILE (ẢNH / ZIP / TXT) ---
+        if clean_path and os.path.isfile(clean_path):
+            low_p = clean_path.lower()
+            if low_p.endswith(".zip"):
+                return _extract_from_zip(clean_path)
+            elif low_p.endswith(".txt"):
+                return _extract_from_txt(clean_path)
+            elif low_p.endswith(valid_img_exts):
+                try:
+                    with open(clean_path, "rb") as f:
+                        return _salt_image_bytes(f.read()), os.path.basename(clean_path)
+                except Exception as e:
+                    return None, f"Lỗi đọc file ảnh: {e}"
+
+        # --- TRƯỜNG HỢP 2: TỰ ĐỘNG QUÉT TRONG THƯ MỤC CHỨA TOOL & THƯ MỤC CON ---
+        avt_dir = os.path.join(base_dir, "avatars")
+        cov_dir = os.path.join(base_dir, "covers")
+        os.makedirs(avt_dir, exist_ok=True)
+        os.makedirs(cov_dir, exist_ok=True)
+
+        search_dirs = []
+        if clean_path and os.path.isdir(clean_path):
+            search_dirs.append(clean_path)
+        if media_type == "avatar":
+            search_dirs.extend([avt_dir, base_dir, cov_dir])
+        else:
+            search_dirs.extend([cov_dir, base_dir, avt_dir])
+
+        image_files = []
+        zip_files = []
+        txt_img_files = []
+
+        for d in search_dirs:
+            if not os.path.isdir(d):
+                continue
+            for fname in os.listdir(d):
+                low_f = fname.lower()
+                full_p = os.path.join(d, fname)
+                if not os.path.isfile(full_p):
+                    continue
+                if low_f.endswith(valid_img_exts) and os.path.getsize(full_p) > 1000:
+                    image_files.append(full_p)
+                elif low_f.endswith(".zip"):
+                    zip_files.append(full_p)
+                elif low_f in ("images.txt", "avatars.txt", "anh.txt", "links_anh.txt"):
+                    txt_img_files.append(full_p)
+            if image_files or zip_files or txt_img_files:
+                break
+
+        if image_files:
+            chosen_img = random.choice(image_files)
+            try:
+                with open(chosen_img, "rb") as f:
+                    return _salt_image_bytes(f.read()), os.path.basename(chosen_img)
+            except Exception as e:
+                return None, f"Lỗi đọc ảnh: {e}"
+
+        if zip_files:
+            return _extract_from_zip(random.choice(zip_files))
+
+        if txt_img_files:
+            return _extract_from_txt(random.choice(txt_img_files))
+
+        return None, f"Chưa có file ảnh! Hãy bỏ 1 file ảnh (.jpg/.png) hoặc file .zip cạnh tool ({base_dir})"
+
     def upload_media(
         self,
         page_id: str,
         page_token: str,
         media_type: str = "avatar",
         profile_uid: str = "",
-        graph_token: str = ""
+        graph_token: str = "",
+        custom_path: str = ""
     ) -> Dict[str, Any]:
         """
-        Up Avatar & Ảnh bìa chuẩn Page Pro5:
-        - Với Cover: Tải ảnh lên /photos (published=false) lấy photo_id -> Gắn cover=photo_id.
-        - Với Avatar (Cơ chế 2 bước chuẩn Pro5):
-            + Bước 1: Dùng sw_token (page_token từ ProfileSwitcher) tải ảnh lên /v24.0/me/photos lấy photo_id.
-            + Bước 2: Gọi GraphQL ProfilePictureSetMutation (với actor_id = ProfileUID 615... & photo_id)
-                      kết hợp POST trực tiếp /v24.0/me/picture bằng sw_token để đóng dấu vào vòng tròn Avatar Pro5.
+        Tự động bóc ảnh từ file của người dùng -> Đổi MD5 -> Đóng dấu vào Avatar/Cover Page Pro5.
         """
-        dl_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        if media_type == "avatar":
-            sources = [
-                f"https://randomuser.me/api/portraits/men/{random.randint(1, 95)}.jpg",
-                f"https://randomuser.me/api/portraits/women/{random.randint(1, 95)}.jpg",
-                f"https://i.pravatar.cc/800?u={uuid.uuid4()}",
-                f"https://picsum.photos/800/800?random={uuid.uuid4()}"
-            ]
-        else:
-            sources = [
-                f"https://picsum.photos/1600/900?random={uuid.uuid4()}",
-                "https://picsum.photos/1600/900"
-            ]
-
-        img_bytes = None
-        for src in sources:
-            try:
-                r = self.session.get(src, headers=dl_headers, timeout=15)
-                if r.status_code == 200 and len(r.content) > 1500:
-                    img_bytes = r.content
-                    break
-            except Exception:
-                pass
-
+        img_bytes, img_info = self._get_image_from_local_repo(media_type=media_type, custom_path=custom_path)
         if not img_bytes:
-            return {"success": False, "message": "Không tải được nguồn ảnh"}
+            return {"success": False, "message": img_info}
 
         sw_tk = page_token or graph_token
         g_tk = graph_token or page_token
         target_prof_uid = str(profile_uid or page_id)
 
         try:
+            # --- 1. UP ẢNH BÌA (COVER) ---
             if media_type == "cover":
                 for tk_try in [sw_tk, g_tk]:
                     if not tk_try:
@@ -2042,14 +2133,43 @@ class FbPageCreator:
                             timeout=30
                         ).json()
                         if isinstance(r2, dict) and "error" not in r2:
-                            return {"success": True}
-                return {"success": False, "message": "Lỗi set ảnh bìa"}
+                            return {"success": True, "file": img_info}
+                return {"success": False, "message": "Lỗi gắn ảnh bìa"}
 
-            # === XỬ LÝ UP AVATAR 2 BƯỚC CHUẨN PRO5 ===
+            # --- 2. UP AVATAR PRO5 ---
             avatar_locked = False
             photo_id = None
+            last_err = ""
 
-            # BƯỚC 1: Tải ảnh lên dưới phiên Pro5 (/v24.0/me/photos bằng sw_token) để lấy photo_id thuộc sở hữu của ProfileUID 615...
+            crop_rect = json.dumps({"x": 0, "y": 0, "width": 1, "height": 1})
+            for pic_ep, tk_use in [
+                (f"https://graph.facebook.com/v24.0/{page_id}/picture", sw_tk),
+                (f"https://graph.facebook.com/v24.0/{page_id}/picture", g_tk),
+                ("https://graph.facebook.com/v24.0/me/picture", sw_tk),
+                (f"https://graph.facebook.com/v24.0/{target_prof_uid}/picture", sw_tk),
+            ]:
+                if not tk_use:
+                    continue
+                try:
+                    r_pic = self.session.post(
+                        pic_ep,
+                        data={
+                            "access_token": tk_use,
+                            "scaled_crop_rect": crop_rect,
+                            "suppress_stories": "false"
+                        },
+                        files={"source": ("avatar.jpg", img_bytes, "image/jpeg")},
+                        headers={"User-Agent": self.user_agent},
+                        timeout=30
+                    ).json()
+                    if isinstance(r_pic, dict) and "error" not in r_pic:
+                        avatar_locked = True
+                        break
+                    elif isinstance(r_pic, dict) and "error" in r_pic:
+                        last_err = r_pic["error"].get("message", "")
+                except Exception as e:
+                    last_err = str(e)
+
             for ep_url, tk_use in [
                 ("https://graph.facebook.com/v24.0/me/photos", sw_tk),
                 (f"https://graph.facebook.com/v24.0/{page_id}/photos", g_tk)
@@ -2070,12 +2190,9 @@ class FbPageCreator:
                 except Exception:
                     pass
 
-            # BƯỚC 2A: Dùng photo_id gọi GraphQL ProfilePictureSetMutation để đóng dấu làm Avatar chính của nhân Pro5 (615...)
             if photo_id:
                 set_pic_doc_ids = ["7251203121614451", "5915022358574157", "6623819204340452"]
                 for actor_try in [target_prof_uid, str(page_id)]:
-                    if avatar_locked:
-                        break
                     for doc_id in set_pic_doc_ids:
                         try:
                             variables = {
@@ -2107,37 +2224,15 @@ class FbPageCreator:
                                 data=gql_data,
                                 timeout=20
                             ).json()
-                            if isinstance(r_gql, dict) and "error" not in r_gql and "errors" not in r_gql and r_gql.get("data"):
+                            if isinstance(r_gql, dict) and "error" not in r_gql and "errors" not in r_gql:
                                 avatar_locked = True
                                 break
                         except Exception:
                             pass
 
-            # BƯỚC 2B: Gọi đồng thời /v24.0/me/picture bằng chính sw_token (Token phiên của ProfileUID 615...)
-            for pic_ep, tk_use in [
-                ("https://graph.facebook.com/v24.0/me/picture", sw_tk),
-                (f"https://graph.facebook.com/v24.0/{target_prof_uid}/picture", sw_tk),
-                (f"https://graph.facebook.com/v24.0/{page_id}/picture", g_tk)
-            ]:
-                if not tk_use:
-                    continue
-                try:
-                    r_pic = self.session.post(
-                        pic_ep,
-                        data={"access_token": tk_use},
-                        files={"source": ("avatar.jpg", img_bytes, "image/jpeg")},
-                        headers={"User-Agent": self.user_agent},
-                        timeout=30
-                    ).json()
-                    if isinstance(r_pic, dict) and "error" not in r_pic:
-                        avatar_locked = True
-                        break
-                except Exception:
-                    pass
-
             if avatar_locked:
-                return {"success": True}
-            return {"success": False, "message": "Không gán được Avatar vào nhân Pro5"}
+                return {"success": True, "file": img_info}
+            return {"success": False, "message": last_err or "Không gắn được Avatar"}
         except Exception as e:
             return {"success": False, "message": str(e)[:60]}
 
@@ -2170,6 +2265,7 @@ class AccountTask:
         assigned_proxy: Optional[str] = None,
         holder_target: Optional[Dict[str, Optional[str]]] = None,
         auto_buff_media: bool = False,
+        custom_media_path: str = "",
         transfer_old_pages: bool = False
     ):
         self.acc_id = acc_id
@@ -2186,6 +2282,7 @@ class AccountTask:
         self.pages_created = 0
         self.ua_mode = ua_mode
         self.auto_buff_media = auto_buff_media
+        self.custom_media_path = custom_media_path
         self.transfer_old_pages = transfer_old_pages
         self.fixed_ua = generate_random_katana_ua(seed=self.token or self.pre_uid) if ua_mode == "fixed" else None
         self.creator: Optional[FbPageCreator] = None
@@ -2202,7 +2299,7 @@ def render_dashboard(accounts: List[AccountTask], stats: Dict[str, int]):
     lines.append(f"{Colors.BOLD}{Colors.CYAN}" + "=" * w + f"{Colors.RESET}")
     lines.append(
         f"{Colors.BOLD}{Colors.YELLOW}"
-        f"   BẢNG TIẾN TRÌNH VIP: REG XONG PAGE NÀO -> CHECK LIVE -> UP AVATAR PRO5 -> CHUYỂN LUÔN PAGE ĐÓ   "
+        f"   BẢNG TIẾN TRÌNH VIP: REG XONG PAGE NÀO -> CHECK LIVE -> UP AVATAR KHO ẢNH -> CHUYỂN LUÔN PAGE ĐÓ   "
         f"{Colors.RESET}"
     )
     lines.append(f"{Colors.BOLD}{Colors.CYAN}" + "=" * w + f"{Colors.RESET}")
@@ -2250,7 +2347,7 @@ def render_dashboard(accounts: List[AccountTask], stats: Dict[str, int]):
     )
     lines.append(f"{Colors.BOLD}{Colors.CYAN}" + "=" * w + f"{Colors.RESET}")
 
-    lines.append(f"{Colors.BOLD}{Colors.MAGENTA} 📋 NHẬT KÝ QUÁ TRÌNH CHI TIẾT (TẠO PAGE -> CHECK LIVE -> UP AVATAR PRO5 -> CHUYỂN LUÔN):{Colors.RESET}")
+    lines.append(f"{Colors.BOLD}{Colors.MAGENTA} 📋 NHẬT KÝ QUÁ TRÌNH CHI TIẾT (TẠO PAGE -> CHECK LIVE -> UP AVATAR KHO ẢNH -> CHUYỂN LUÔN):{Colors.RESET}")
     with LOG_LOCK:
         if not LIVE_PROCESS_LOGS:
             lines.append("   (Đang khởi tạo luồng xử lý...)")
@@ -2273,7 +2370,7 @@ def dashboard_render_loop(accounts: List[AccountTask], stats: Dict[str, int], st
 
 
 # ==============================================================================
-# 8. LUỒNG XỬ LÝ CUỐN CHIẾU TỪNG PAGE (ĐỒNG BỘ PROFILESWITCHER -> UP AVATAR 2 BƯỚC -> CHUYỂN)
+# 8. LUỒNG XỬ LÝ CUỐN CHIẾU TỪNG PAGE (BÓC KHO ẢNH CÁ NHÂN -> UP AVATAR -> CHUYỂN)
 # ==============================================================================
 
 def process_single_account_workflow(
@@ -2287,7 +2384,6 @@ def process_single_account_workflow(
 ):
     acc.status = "running"
 
-    # --- BƯỚC 0: TỰ ĐỘNG LOGIN BLOKS CAA V5 NẾU CHƯA CÓ TOKEN EAAAAU ---
     if not acc.token:
         acc.current_action = f"[L{thread_id}] Đang tự động Login lấy Token EAAAAU cho UID {acc.pre_uid}..."
         add_process_log(acc.acc_id, acc.pre_uid, "Chưa có sẵn EAAAAU -> Đang tự động Login Bloks CAA v5 để lấy Token...")
@@ -2321,7 +2417,6 @@ def process_single_account_workflow(
         ua_mode=acc.ua_mode
     )
 
-    # --- BƯỚC 1: KIỂM TRA TÀI KHOẢN BAN ĐẦU & QUÉT PAGE CŨ ---
     acc.current_action = f"[L{thread_id}] Bước 1: Đang kiểm tra Tài khoản & quét Page cũ..."
     acc_info = acc.creator.check_account_live(retries=3)
 
@@ -2389,7 +2484,6 @@ def process_single_account_workflow(
     wait_seconds = max(1, int(verify_delay))
     consecutive_fails = 0
 
-    # --- TÙY CHỌN: CHUYỂN LUÔN CÁC PAGE CŨ ĐANG CÓ SẴN TRONG ACC ---
     if acc.transfer_old_pages and existing_old_pages and (acc.holder_uid or acc.holder_token):
         add_process_log(
             acc.acc_id,
@@ -2443,7 +2537,6 @@ def process_single_account_workflow(
                 with open("acc_cam_page.txt", "a", encoding="utf-8") as f_holder:
                     f_holder.write(f"{acc.mother_uid}|{acc.password}|{acc.token}|{p_id}|{p_uid}|{p_name}|{p_token}|{tr_tag}|{now_str}\n")
 
-    # --- VÒNG LẶP CUỐN CHIẾU TỪNG PAGE MỚI: REG -> ĐỢI CHECK LIVE -> UP AVATAR PRO5 2 BƯỚC -> CHUYỂN LUÔN ---
     for idx in range(1, acc.target_pages + 1):
         acc.status = "running"
         page_name = get_page_name(name_type, custom_names)
@@ -2452,7 +2545,6 @@ def process_single_account_workflow(
             acc.current_action = f"[L{thread_id}] [Page {idx}/{acc.target_pages}] {msg_step}"
             add_process_log(acc.acc_id, acc.mother_uid, f"[Page {idx}/{acc.target_pages}] {msg_step}")
 
-        # 1. TẠO PAGE THỨ IDX
         create_res = acc.creator.create_page_and_get_token(
             page_name=page_name,
             known_page_ids=known_page_ids,
@@ -2520,7 +2612,6 @@ def process_single_account_workflow(
             f"{Colors.GREEN}🎉 [Page {idx}] Tạo thành công '{p_name}' (ID: {p_id} | ProfileUID: {p_uid}) | Token: {short_ptk}{Colors.RESET}"
         )
 
-        # 2. ĐỢI ĐẾM NGƯỢC & ĐỒNG BỘ PROFILESWITCHER TRƯỚC KHI UP ẢNH & CHUYỂN PAGE
         acc.status = "waiting_check"
         add_process_log(
             acc.acc_id,
@@ -2545,7 +2636,6 @@ def process_single_account_workflow(
                     f.write(f"{acc.mother_uid}|{acc.password}|{acc.token}|DIE_SAU_{wait_seconds}S_PAGE_{idx}\n")
             return
 
-        # Đồng bộ lại ProfileSwitcherQuery để lấy đúng sw_token và ProfileUID (615...) mới nhất của Page này
         fresh_raw_pages = _fetch_all_pages_raw(acc.token, acc.mother_uid, proxy=acc.proxy)
         for sw_item in fresh_raw_pages:
             if (
@@ -2578,31 +2668,39 @@ def process_single_account_workflow(
             f"{Colors.GREEN}✔ [Page {idx}] Check LIVE OK: Page {p_id} (ProfileUID: {p_uid}) SỐNG!{Colors.RESET}"
         )
 
-        # 3. (TÙY CHỌN) UP COVER TRƯỚC -> UP AVATAR PRO5 2 BƯỚC SAU -> ĐĂNG BÀI WELCOME
         if acc.auto_buff_media and (p_token or g_token):
-            acc.current_action = f"[L{thread_id}] [Page {idx}] Đang Up Ảnh bìa (Cover) cho '{p_name}'..."
+            acc.current_action = f"[L{thread_id}] [Page {idx}] Đang bóc ảnh từ kho & Up Ảnh bìa cho '{p_name}'..."
             cv_res = acc.creator.upload_media(
-                page_id=p_id, page_token=p_token, media_type="cover", profile_uid=p_uid, graph_token=g_token
+                page_id=p_id,
+                page_token=p_token,
+                media_type="cover",
+                profile_uid=p_uid,
+                graph_token=g_token,
+                custom_path=acc.custom_media_path
             )
             time.sleep(2)
 
-            acc.current_action = f"[L{thread_id}] [Page {idx}] Đang Up Avatar 2 bước Pro5 cho '{p_name}' (UID: {p_uid})..."
+            acc.current_action = f"[L{thread_id}] [Page {idx}] Đang bóc ảnh từ kho & Up Avatar Pro5 cho '{p_name}'..."
             av_res = acc.creator.upload_media(
-                page_id=p_id, page_token=p_token, media_type="avatar", profile_uid=p_uid, graph_token=g_token
+                page_id=p_id,
+                page_token=p_token,
+                media_type="avatar",
+                profile_uid=p_uid,
+                graph_token=g_token,
+                custom_path=acc.custom_media_path
             )
             time.sleep(1)
 
             acc.creator.post_welcome(p_id, p_token or g_token)
 
-            av_status = "OK" if av_res.get("success") else f"Lỗi ({av_res.get('message')})"
-            cv_status = "OK" if cv_res.get("success") else "Lỗi"
+            av_status = f"OK ({av_res.get('file', '')})" if av_res.get("success") else f"Lỗi ({av_res.get('message')})"
+            cv_status = f"OK ({cv_res.get('file', '')})" if cv_res.get("success") else f"Lỗi ({cv_res.get('message')})"
             add_process_log(
                 acc.acc_id,
                 acc.mother_uid,
-                f"{Colors.CYAN}🖼️ [Page {idx}] Up Media Pro5 -> Avatar: {av_status} | Cover: {cv_status} | Welcome Post: OK{Colors.RESET}"
+                f"{Colors.CYAN}🖼️ [Page {idx}] Kho Ảnh -> Avatar: {av_status} | Cover: {cv_status}{Colors.RESET}"
             )
 
-        # 4. CHUYỂN LUÔN PAGE NÀY SANG NICK MẸ (FULL 4 BƯỚC NT_BUNDLE_TREE)
         transfer_ok = False
         transfer_status = "NO_TARGET"
         invitation_id = ""
@@ -2633,7 +2731,6 @@ def process_single_account_workflow(
             else:
                 add_process_log(acc.acc_id, acc.mother_uid, f"{Colors.YELLOW}⚠️ [Page {idx}] {last_transfer_note}{Colors.RESET}")
 
-        # 5. LƯU NGAY PAGE NÀY VÀO FILE & CẬP NHẬT THỐNG KÊ TỨC THÌ
         acc.pages_created += 1
         page_summary_list.append(f"{p_id}:{p_name}")
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -2656,13 +2753,11 @@ def process_single_account_workflow(
                 else:
                     f_holder.write(f"{acc.mother_uid}|{acc.password}|{acc.token}|{p_id}|{p_uid}|{p_name}|{p_token}|PAGE_LIVE|{now_str}\n")
 
-        # 6. NGHỈ DELAY TRƯỚC KHI TẠO PAGE TIẾP THEO (NẾU TARGET > 1)
         if idx < acc.target_pages and delay_between_pages > 0:
             for s_rem in range(delay_between_pages, 0, -1):
                 acc.current_action = f"[L{thread_id}] Đã xong Page {idx}/{acc.target_pages}! Nghỉ {s_rem}s trước khi Reg Page {idx + 1}..."
                 time.sleep(1)
 
-    # --- KẾT THÚC TÀI KHOẢN ---
     if acc.pages_created == 0:
         if hit_limit:
             acc.status = "limit"
@@ -2719,19 +2814,18 @@ def worker_reg_account(
 
 
 # ==============================================================================
-# 9. MENU [1]: REG PAGE VIP V5 -> CHECK LIVE -> UP AVATAR PRO5 -> CHUYỂN LUÔN
+# 9. MENU [1]: REG PAGE VIP V5 -> CHECK LIVE -> BÓC KHO ẢNH UP AVATAR -> CHUYỂN LUÔN
 # ==============================================================================
 
 def run_reg_page_menu():
     print_banner()
     safe_print(f"{Colors.BOLD}{Colors.MAGENTA}=== [1] REG PAGE VIP V5 -> REG XONG PAGE NÀO CHECK LIVE & CHUYỂN LUÔN PAGE ĐÓ ==={Colors.RESET}\n")
 
-    # 1. CẤU HÌNH TÀI KHOẢN ĐÍCH (NICK MẸ) TRƯỚC ĐỂ KHÔNG BỊ TRÔI PHÍM ENTER
     safe_print(f"{Colors.CYAN}--- [1/8] CẤU HÌNH TÀI KHOẢN ĐÍCH (NICK MẸ NHẬN PAGE) ---{Colors.RESET}")
+    safe_print("- Nhập chỉ UID_ME (VD: 61595794700184)                              -> Chạy Bước 1 + Bước 2 (Gửi lời mời Admin)")
     safe_print("- Nhập TOKEN Nick Mẹ (EAAAAU...) hoặc dòng UID|Pass|Cookie|Token_Mẹ -> Chạy FULL 4 BƯỚC (Auto Accept)")
-    safe_print("- Nhập chỉ UID_ME (VD: 100012345678)                                -> Chạy Bước 1 + Bước 2 (Gửi lời mời)")
     safe_print("- Nhập 0 (hoặc nhấn Enter)                                          -> Chỉ tạo Page và lưu file.")
-    h_raw = input("Nhập Token (hoặc UID) Nick Mẹ nhận Page: ").strip()
+    h_raw = input("Nhập UID (hoặc Token) Nick Mẹ nhận Page: ").strip()
 
     holder_targets = []
     if h_raw and h_raw != "0":
@@ -2751,7 +2845,7 @@ def run_reg_page_menu():
                     t_name = info_nhan[1] if info_nhan else "Nick Mẹ"
                     safe_print(f"{Colors.GREEN}✔ Đã nhận diện Nick Mẹ: {t_name} (ID: {t['uid']}) -> Bật Auto Accept Full 4 Bước!{Colors.RESET}")
                 else:
-                    safe_print(f"{Colors.GREEN}✔ Đã nhận diện UID Nick Mẹ: {t['uid']} -> Chế độ bắn lời mời Bước 1 & 2.{Colors.RESET}")
+                    safe_print(f"{Colors.GREEN}✔ Đã nhận diện UID Nick Mẹ: {t['uid']} -> Chế độ bắn lời mời Bước 1 & 2 (Không cần Token nick nhận).{Colors.RESET}")
                 holder_targets.append(t)
 
     transfer_old_pages = False
@@ -2762,7 +2856,6 @@ def run_reg_page_menu():
         transfer_old_pages = (old_ch == "y")
         safe_print("")
 
-    # 2. NẠP DANH SÁCH ACC NGUỒN
     safe_print(f"{Colors.CYAN}--- [2/8] NẠP DANH SÁCH ACC NGUỒN (NHẬN MỌI BIẾN THỂ ĐỊNH DẠNG) ---{Colors.RESET}")
     safe_print("Hỗ trợ: UID|Pass|Cookie|Token, UID|Pass|Token, UID|Pass|Cookie, UID|Pass|2FA, hoặc chỉ Token")
     safe_print("[1] Dán trực tiếp vào màn hình (tự động bóc tách)")
@@ -2801,7 +2894,6 @@ def run_reg_page_menu():
         default_pwd = input("Nhập Mật khẩu mặc định cho các Acc chưa kèm pass (Enter nếu bỏ qua): ").strip()
         safe_print("")
 
-    # 3. Tên Page
     safe_print(f"{Colors.CYAN}--- [3/8] CHỌN LOẠI TÊN PAGE ---{Colors.RESET}")
     safe_print("[1] Tên Việt thuần 100% (Ví dụ: Nguyễn Văn Khải, Trần Thị Mai...)")
     safe_print("[2] Tên Ngoại / US (Ví dụ: Sophia Davis, David Miller...)")
@@ -2824,13 +2916,23 @@ def run_reg_page_menu():
             name_type = "viet"
     safe_print("")
 
-    # 4. Tự động Up Avatar/Cover/Post
-    safe_print(f"{Colors.CYAN}--- [4/8] TỰ ĐỘNG UP AVATAR 2 BƯỚC PRO5, ẢNH BÌA & BÀI ĐĂNG ---{Colors.RESET}")
-    buff_choice = input("Có tự động Up Avatar Pro5 + Ảnh bìa + Đăng bài Welcome sau khi Check Live Page không? (y/n, mặc định y): ").strip().lower() or "y"
+    # 4. CẤU HÌNH KHO ẢNH CÁ NHÂN (FILE ẢNH / FILE ZIP / THƯ MỤC)
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    avt_default_dir = os.path.join(base_dir, "avatars")
+    os.makedirs(avt_default_dir, exist_ok=True)
+
+    safe_print(f"{Colors.CYAN}--- [4/8] TỰ ĐỘNG BÓC TÁCH KHO ẢNH CÁ NHÂN (UP AVATAR & ẢNH BÌA PRO5) ---{Colors.RESET}")
+    buff_choice = input("Có tự động Up Avatar + Ảnh bìa từ kho ảnh của bạn không? (y/n, mặc định y): ").strip().lower() or "y"
     auto_buff_media = (buff_choice == "y")
+    custom_media_path = ""
+
+    if auto_buff_media:
+        safe_print(f"{Colors.YELLOW}Hướng dẫn nạp kho ảnh:{Colors.RESET}")
+        safe_print(" - Bạn có thể KÉO THẢ 1 file ảnh (.jpg/.png), hoặc 1 file nén (.zip chứa nhiều ảnh), hoặc 1 thư mục ảnh vào đây.")
+        safe_print(f" - Hoặc nhấn Enter để tool tự động lấy mọi file ảnh / file .zip nằm trong thư mục '{avt_default_dir}' hoặc cạnh file code.")
+        custom_media_path = input("Nhập/Kéo thả đường dẫn file ảnh, file .zip hoặc thư mục ảnh (Enter = Tự động quét): ").strip()
     safe_print("")
 
-    # 5. User-Agent
     safe_print(f"{Colors.CYAN}--- [5/8] CƠ CHẾ USER-AGENT (KATANA ANDROID) ---{Colors.RESET}")
     safe_print("[1] Cố định 1 UA cho mỗi nick [Khuyên dùng]")
     safe_print("[2] Random UA mới mỗi lần tạo Page")
@@ -2838,7 +2940,6 @@ def run_reg_page_menu():
     ua_mode = "random" if c_ua == "2" else "fixed"
     safe_print("")
 
-    # 6. Proxy
     safe_print(f"{Colors.CYAN}--- [6/8] CẤU HÌNH PROXY ---{Colors.RESET}")
     global_proxies = []
     has_attached = any(it.get("proxy") for it in parsed_items)
@@ -2866,7 +2967,6 @@ def run_reg_page_menu():
         else:
             safe_print(f"{Colors.YELLOW}Chạy trực tiếp mạng máy tính / 4G.{Colors.RESET}\n")
 
-    # 7. Số page & Thời gian đợi check Live từng Page
     safe_print(f"{Colors.CYAN}--- [7/8] SỐ PAGE TRÊN 1 ACC & THỜI GIAN ĐỢI CHECK LIVE TỪNG PAGE ---{Colors.RESET}")
     try:
         pages_per_nick = int(input("Số lượng Page muốn reg trên 1 Acc (Mặc định 4): ").strip() or "4")
@@ -2886,7 +2986,6 @@ def run_reg_page_menu():
             delay_between = 5
     safe_print("")
 
-    # 8. Luồng
     safe_print(f"{Colors.CYAN}--- [8/8] SỐ LUỒNG CHẠY SONG SONG ---{Colors.RESET}")
     try:
         num_threads = int(input(f"Nhập số luồng (Mặc định {min(3, len(parsed_items))}): ").strip() or str(min(3, len(parsed_items))))
@@ -2927,6 +3026,7 @@ def run_reg_page_menu():
             assigned_proxy=assigned_px,
             holder_target=assigned_target,
             auto_buff_media=auto_buff_media,
+            custom_media_path=custom_media_path,
             transfer_old_pages=transfer_old_pages
         )
         account_tasks.append(task_obj)
@@ -2971,16 +3071,16 @@ def run_reg_page_menu():
 
 
 # ==============================================================================
-# 10. MENU [2]: CÔNG CỤ CHUYỂN QUYỀN QUẢN TRỊ PAGE SIÊU MẠNH (CHẾ ĐỘ ĐỘC LẬP)
+# 10. MENU [2]: NHẬP NICK ĐANG CẦM PAGE -> QUÉT RA DANH SÁCH PAGE -> BẮN SANG NICK KHÁC (CHỈ CẦN UID)
 # ==============================================================================
 
 def setup_source_account_interactive(account_index: int, allow_cancel: bool = True) -> Optional[Dict[str, Any]]:
-    safe_print(f"\n{Colors.BLUE}===== TÀI KHOẢN NGUỒN {account_index} ====={Colors.RESET}")
+    safe_print(f"\n{Colors.BLUE}===== NHẬP NICK ĐANG CẦM PAGE #{account_index} ====={Colors.RESET}")
     if allow_cancel:
-        safe_print("(Nhấn Enter để bỏ trống và kết thúc nhập tài khoản nguồn)")
+        safe_print("(Nhấn Enter bỏ trống nếu đã nhập xong danh sách nick cầm Page)")
 
     while True:
-        raw_in = input(f"Nhập Token (hoặc dòng UID|Pass|Cookie|Token) của tài khoản nguồn {account_index}: ").strip()
+        raw_in = input(f"Dán dòng UID|Pass|Cookie|Token (hoặc Token) của nick cầm Page #{account_index}: ").strip()
         if not raw_in:
             if allow_cancel:
                 return None
@@ -2990,31 +3090,39 @@ def setup_source_account_interactive(account_index: int, allow_cancel: bool = Tr
         parsed = parse_universal_line(raw_in)
         token_acc_page = parsed["token"] if parsed and parsed.get("token") else raw_in
         pwd_parsed = parsed.get("pwd", "") if parsed else ""
+        uid_parsed = parsed.get("uid", "") if parsed else ""
         px_parsed = parsed.get("proxy") if parsed else None
 
-        if not token_acc_page.startswith("EAAAA") and parsed and parsed.get("uid") and parsed.get("pwd"):
-            safe_print(f"{Colors.YELLOW}Đang tự động Login lấy Token cho UID {parsed['uid']}...{Colors.RESET}")
+        if not token_acc_page.startswith("EAAAA") and parsed and uid_parsed and pwd_parsed:
+            safe_print(f"{Colors.YELLOW}Chưa có sẵn Token -> Đang tự động Login lấy Token cho UID {uid_parsed}...{Colors.RESET}")
             l_res = login_and_get_token(parsed)
             if l_res.get("success"):
                 token_acc_page = l_res["token"]
 
         info = get_id(token_acc_page, proxy=px_parsed)
+        if info is None and parsed and uid_parsed and pwd_parsed:
+            safe_print(f"{Colors.YELLOW}! Token cũ hết hạn -> Đang Login lại bằng mật khẩu để lấy Token mới...{Colors.RESET}")
+            l_res = login_and_get_token(parsed)
+            if l_res.get("success"):
+                token_acc_page = l_res["token"]
+                info = get_id(token_acc_page, proxy=px_parsed)
+
         if info is None:
-            safe_print(f"{Colors.RED}✗ Token không hợp lệ hoặc không lấy được thông tin tài khoản. Vui lòng nhập lại.{Colors.RESET}")
+            safe_print(f"{Colors.RED}✗ Không lấy được thông tin tài khoản (Token DIE hoặc sai định dạng). Vui lòng nhập lại.{Colors.RESET}")
             continue
 
         id_acc, name_acc = info
-        safe_print(f"{Colors.GREEN}✓ Tài khoản nguồn {account_index}: {name_acc} (ID: {id_acc}){Colors.RESET}")
+        safe_print(f"{Colors.GREEN}✓ Đã nhận Nick cầm Page #{account_index}: {name_acc} (ID: {id_acc}){Colors.RESET}")
         break
 
     while True:
-        safe_print(f"\nĐang lấy danh sách Page của tài khoản nguồn {account_index}...")
+        safe_print(f"Đang quét danh sách Page của nick {name_acc} ({id_acc})...")
         selected_pages = get_token_pages(token_acc_page, id_acc, proxy=px_parsed)
         if selected_pages:
             break
         retry = input(
-            f"\n{Colors.YELLOW}! Không có Page nào được chọn cho tài khoản nguồn {account_index}.{Colors.RESET}\n"
-            f"  Nhập 'r' để thử lại, 't' để đổi token khác, hoặc 'q' để hủy: "
+            f"\n{Colors.YELLOW}! Nick {name_acc} không có Page nào được chọn.{Colors.RESET}\n"
+            f"  Nhập 'r' để quét lại, 't' để đổi nick khác, hoặc 'q' để hủy: "
         ).strip().lower()
         if retry == "q":
             return None
@@ -3022,10 +3130,10 @@ def setup_source_account_interactive(account_index: int, allow_cancel: bool = Tr
             return setup_source_account_interactive(account_index, allow_cancel=allow_cancel)
 
     if pwd_parsed:
-        safe_print(f"{Colors.GREEN}✓ Đã tự động nhận mật khẩu từ dòng nhập: {pwd_parsed}{Colors.RESET}")
+        safe_print(f"{Colors.GREEN}✓ Đã tự động tách mật khẩu của nick {name_acc}: {pwd_parsed}{Colors.RESET}")
         mk = pwd_parsed
     else:
-        mk = input(f"\nNhập mật khẩu của tài khoản nguồn {account_index}: ").strip()
+        mk = input(f"Nhập mật khẩu của nick cầm Page ({name_acc}): ").strip()
 
     return {
         "index": account_index,
@@ -3038,13 +3146,13 @@ def setup_source_account_interactive(account_index: int, allow_cancel: bool = Tr
     }
 
 
-def setup_source_from_universal_lines(lines: List[str]) -> List[Dict[str, Any]]:
+def setup_source_from_universal_lines(lines: List[str], ask_select_each: bool = False) -> List[Dict[str, Any]]:
     creds = parse_universal_lines(lines)
     if not creds:
         safe_print(f"{Colors.RED}✗ Không tìm thấy tài khoản hợp lệ nào.{Colors.RESET}")
         return []
 
-    safe_print(f"\n{Colors.CYAN}→ Bắt đầu quét Page trên {len(creds)} tài khoản nguồn...{Colors.RESET}")
+    safe_print(f"\n{Colors.CYAN}→ Bắt đầu quét Page trên {len(creds)} nick cầm Page...{Colors.RESET}")
     accounts: List[Dict[str, Any]] = []
 
     for i, cred in enumerate(creds, 1):
@@ -3053,7 +3161,7 @@ def setup_source_from_universal_lines(lines: List[str]) -> List[Dict[str, Any]]:
         uid_file = cred.get("uid", "")
         px = cred.get("proxy")
 
-        safe_print(f"\n{Colors.BLUE}--- Tài khoản nguồn #{i} (UID: {uid_file or 'Unknown'}) ---{Colors.RESET}")
+        safe_print(f"\n{Colors.BLUE}--- Nick cầm Page #{i} (UID: {uid_file or 'Unknown'}) ---{Colors.RESET}")
 
         if not token and uid_file and password:
             safe_print(f"  {Colors.YELLOW}Chưa có sẵn Token EAAAAU -> Đang tự động Login Bloks CAA v5...{Colors.RESET}")
@@ -3067,7 +3175,7 @@ def setup_source_from_universal_lines(lines: List[str]) -> List[Dict[str, Any]]:
 
         info = get_id(token, proxy=px)
         if info is None and uid_file and password:
-            safe_print(f"  {Colors.YELLOW}! Token cũ không verify được -> Thử Login lại bằng mật khẩu...{Colors.RESET}")
+            safe_print(f"  {Colors.YELLOW}! Token cũ hết hạn -> Đang Login lại bằng mật khẩu...{Colors.RESET}")
             l_res = login_and_get_token(cred)
             if l_res.get("success"):
                 token = l_res["token"]
@@ -3077,21 +3185,28 @@ def setup_source_from_universal_lines(lines: List[str]) -> List[Dict[str, Any]]:
             if not uid_file:
                 safe_print(f"  {Colors.RED}✗ Token DIE và không có UID -> Bỏ qua.{Colors.RESET}")
                 continue
-            safe_print(f"  {Colors.YELLOW}! Token không verify được qua /me — dùng UID từ dữ liệu: {uid_file}{Colors.RESET}")
+            safe_print(f"  {Colors.YELLOW}! Không verify được /me — dùng UID từ dữ liệu: {uid_file}{Colors.RESET}")
             id_acc = str(uid_file)
-            name_acc = f"(unknown - uid {uid_file})"
+            name_acc = f"(UID {uid_file})"
         else:
             id_acc_api, name_acc = info
             id_acc = str(uid_file or id_acc_api)
             safe_print(f"  {Colors.GREEN}✓ Tài khoản: {name_acc} (UID: {id_acc}){Colors.RESET}")
 
-        safe_print("  Đang lấy tất cả Page (ProfileSwitcherQuery + Graph API v24.0)...")
-        all_pages = get_all_pages(token, id_acc, proxy=px)
-        if not all_pages:
-            safe_print(f"  {Colors.YELLOW}! Tài khoản UID {id_acc} không có Page nào. Bỏ qua.{Colors.RESET}")
+        if ask_select_each:
+            chosen_pages = get_token_pages(token, id_acc, proxy=px)
+        else:
+            safe_print("  Đang lấy tất cả Page (ProfileSwitcherQuery + Graph API v24.0)...")
+            chosen_pages = get_all_pages(token, id_acc, proxy=px)
+            if chosen_pages:
+                for p_idx, p_it in enumerate(chosen_pages, 1):
+                    safe_print(f"    [{p_idx}] {p_it['page_name']} (PageID: {p_it['page_id']} | ProfileUID: {p_it['page_uid']})")
+
+        if not chosen_pages:
+            safe_print(f"  {Colors.YELLOW}! Nick UID {id_acc} không có Page nào để chuyển. Bỏ qua.{Colors.RESET}")
             continue
 
-        safe_print(f"  {Colors.GREEN}→ Tìm thấy {len(all_pages)} Page. Sẽ chuyển TẤT CẢ {len(all_pages)} Page.{Colors.RESET}")
+        safe_print(f"  {Colors.GREEN}→ Đã chọn {len(chosen_pages)} Page để chuyển.{Colors.RESET}")
         accounts.append({
             "index": i,
             "id": id_acc,
@@ -3099,7 +3214,7 @@ def setup_source_from_universal_lines(lines: List[str]) -> List[Dict[str, Any]]:
             "token": token,
             "password": password,
             "proxy": px,
-            "pages": all_pages
+            "pages": chosen_pages
         })
 
     return accounts
@@ -3107,104 +3222,115 @@ def setup_source_from_universal_lines(lines: List[str]) -> List[Dict[str, Any]]:
 
 def run_standalone_super_transfer_menu():
     print_banner()
-    safe_print(f"{Colors.GREEN}{Colors.BOLD}=== [2] CÔNG CỤ CHUYỂN QUYỀN QUẢN TRỊ PAGE SIÊU MẠNH (FULL 4 BƯỚC NT_BUNDLE_TREE) ==={Colors.RESET}\n")
+    safe_print(f"{Colors.GREEN}{Colors.BOLD}=== [2] QUÉT PAGE TỪ NICK CẦM PAGE -> CHUYỂN SANG NICK KHÁC (CHỈ CẦN UID HOẶC KÈM TOKEN) ==={Colors.RESET}\n")
 
-    # ===== BƯỚC 1: NHẬP TÀI KHOẢN NHẬN PAGE =====
-    safe_print(f"{Colors.BLUE}===== BƯỚC 1: TÀI KHOẢN NHẬN PAGE (NICK MẸ) ====={Colors.RESET}")
-    token_nhan = ""
-    id_acc_nhan = ""
-    name_acc_nhan = ""
-
-    while True:
-        raw_nhan = input("Nhập Token (hoặc UID|Pass|Cookie|Token) của tài khoản nhận Page: ").strip()
-        if not raw_nhan:
-            safe_print("Token nhận không được để trống.")
-            continue
-
-        parsed_nhan = parse_universal_line(raw_nhan)
-        token_nhan = parsed_nhan["token"] if parsed_nhan and parsed_nhan.get("token") else raw_nhan
-        if not token_nhan.startswith("EAAAA") and parsed_nhan and parsed_nhan.get("uid") and parsed_nhan.get("pwd"):
-            l_res = login_and_get_token(parsed_nhan)
-            if l_res.get("success"):
-                token_nhan = l_res["token"]
-
-        info_nhan = get_id(token_nhan)
-        if info_nhan is None:
-            safe_print(f"{Colors.RED}✗ Token không hợp lệ hoặc không lấy được thông tin tài khoản nhận. Vui lòng nhập lại.{Colors.RESET}")
-            continue
-
-        id_acc_nhan, name_acc_nhan = info_nhan
-        safe_print(f"{Colors.GREEN}✓ Tài khoản đích: {name_acc_nhan} (ID: {id_acc_nhan}){Colors.RESET}")
-        break
-
-    logger.info("Đang kiểm tra danh sách Page mà tài khoản đích đang quản lý...")
-    target_page_ids = get_managed_page_ids(token_nhan)
-    if target_page_ids:
-        safe_print(f"{Colors.GREEN}✓ Tài khoản đích đang quản lý {len(target_page_ids)} Page (Sẽ tự động bỏ qua các Page đã có quyền).{Colors.RESET}")
-    else:
-        safe_print(f"{Colors.YELLOW}! Tài khoản đích hiện chưa quản lý Page nào (hoặc không bỏ qua Page nào).{Colors.RESET}")
-
-    # ===== BƯỚC 2: THIẾT LẬP CÁC TÀI KHOẢN NGUỒN =====
-    safe_print(f"\n{Colors.BLUE}===== BƯỚC 2: THIẾT LẬP TÀI KHOẢN NGUỒN (ACC CẦM PAGE) ====={Colors.RESET}")
-    safe_print("Chọn phương thức nhập tài khoản nguồn:")
-    safe_print(f"  {Colors.YELLOW}[1]{Colors.RESET} Nhập thủ công từng Acc/Token & tự chọn Page (1-5, 1,3,5, all)")
-    safe_print(f"  {Colors.YELLOW}[2]{Colors.RESET} Dán trực tiếp nhiều dòng (UID|Pass|Cookie|Token, UID|Pass|Token...) — tự chuyển TẤT CẢ Page")
-    safe_print(f"  {Colors.YELLOW}[3]{Colors.RESET} Đọc từ file (hỗ trợ mọi định dạng uid|pass|token / acc_cam_page.txt) — tự chuyển TẤT CẢ Page")
+    safe_print(f"{Colors.BLUE}===== BƯỚC 1: NHẬP NICK ĐANG CẦM PAGE (UID|Pass|Cookie|Token...) ====={Colors.RESET}")
+    safe_print("Chọn cách nạp nick đang cầm Page:")
+    safe_print(f"  {Colors.YELLOW}[1]{Colors.RESET} Dán 1 hoặc nhiều Nick cầm Page -> Hiện danh sách Page & tự chọn Page muốn chuyển (1-5, all) [Khuyên dùng]")
+    safe_print(f"  {Colors.YELLOW}[2]{Colors.RESET} Dán nhiều dòng Nick cầm Page -> Tự động gom chuyển TẤT CẢ Page của các nick đó")
+    safe_print(f"  {Colors.YELLOW}[3]{Colors.RESET} Đọc từ file (acc_cam_page.txt / tokens.txt) -> Tự động gom chuyển TẤT CẢ Page")
 
     while True:
-        mode = input("Lựa chọn (1/2/3, mặc định 2): ").strip() or "2"
+        mode = input("Lựa chọn (1/2/3, mặc định 1): ").strip() or "1"
         if mode in ("1", "2", "3"):
             break
         safe_print("Vui lòng nhập 1, 2 hoặc 3.")
 
     source_accounts: List[Dict[str, Any]] = []
 
-    if mode == "2":
-        raw_lines = input_multiline("Dán danh sách tài khoản nguồn vào đây:")
-        source_accounts = setup_source_from_universal_lines(raw_lines)
-    elif mode == "3":
+    if mode == "1":
+        raw_lines = input_multiline("Dán dòng (UID|Pass|Cookie|Token...) của Nick đang cầm Page vào đây:")
+        source_accounts = setup_source_from_universal_lines(raw_lines, ask_select_each=True)
+    elif mode == "2":
+        raw_lines = input_multiline("Dán danh sách các Nick đang cầm Page vào đây:")
+        source_accounts = setup_source_from_universal_lines(raw_lines, ask_select_each=False)
+    else:
         while True:
-            filepath = input("Nhập đường dẫn file tài khoản nguồn (mặc định acc_cam_page.txt): ").strip().strip('"').strip("'") or "acc_cam_page.txt"
+            filepath = input("Nhập đường dẫn file nick cầm Page (mặc định acc_cam_page.txt): ").strip().strip('"').strip("'") or "acc_cam_page.txt"
             if not os.path.isfile(filepath):
                 safe_print(f"{Colors.RED}✗ File không tồn tại: {filepath}{Colors.RESET}")
                 continue
             with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
                 raw_lines = [ln.strip() for ln in f if ln.strip() and not ln.strip().startswith("#")]
-            source_accounts = setup_source_from_universal_lines(raw_lines)
+            source_accounts = setup_source_from_universal_lines(raw_lines, ask_select_each=False)
             if source_accounts:
                 break
             retry_f = input("Không đọc được tài khoản nào có Page. Nhập 'q' để quay lại hoặc Enter để chọn file khác: ").strip().lower()
             if retry_f == "q":
                 return
-    else:
-        safe_print(f"Nhập từng tài khoản nguồn. {Colors.YELLOW}Nhấn Enter (bỏ trống) để kết thúc nhập.{Colors.RESET}")
-        idx = 1
-        while True:
-            acc = setup_source_account_interactive(idx, allow_cancel=True)
-            if acc is None:
-                if idx == 1:
-                    safe_print(f"{Colors.RED}! Cần ít nhất 1 tài khoản nguồn để chuyển.{Colors.RESET}")
-                    input("\nNhấn Enter để quay lại...")
-                    return
-                safe_print(f"\n{Colors.GREEN}✓ Đã nhập xong {len(source_accounts)} tài khoản nguồn.{Colors.RESET}")
-                break
-            source_accounts.append(acc)
-            safe_print(f"{Colors.GREEN}✓ Đã thiết lập tài khoản nguồn {idx}: {acc['name']} với {len(acc['pages'])} Page.{Colors.RESET}")
-            idx += 1
 
     if not source_accounts:
-        safe_print(f"{Colors.RED}! Không có tài khoản nguồn nào có Page để xử lý.{Colors.RESET}")
+        safe_print(f"{Colors.RED}! Không có nick cầm Page nào hợp lệ để xử lý.{Colors.RESET}")
         input("\nNhấn Enter để quay lại...")
         return
 
     missing_pwd = any(not a.get("password") for a in source_accounts)
     if missing_pwd:
-        default_mk = input(f"\n{Colors.YELLOW}Phát hiện có Acc nguồn chưa kèm mật khẩu. Nhập mật khẩu chung cho các Acc đó: {Colors.RESET}").strip()
+        default_mk = input(f"\n{Colors.YELLOW}Phát hiện nick cầm Page chưa kèm mật khẩu. Nhập mật khẩu của nick cầm Page: {Colors.RESET}").strip()
         for a in source_accounts:
             if not a.get("password"):
                 a["password"] = default_mk
 
-    # ===== BƯỚC 3: NHẬP DELAY =====
+    safe_print(f"\n{Colors.BLUE}===== BƯỚC 2: NHẬP NICK MUỐN CHUYỂN PAGE SANG (CHỈ CẦN UID) ====={Colors.RESET}")
+    safe_print("- Nếu nick nhận CHỈ CÓ UID: Nhập mỗi UID (VD: 61595794700184) -> Tool bắn lời mời Full Admin sang UID đó!")
+    safe_print("- Nếu muốn Auto Accept luôn: Nhập Token hoặc UID|Pass|Cookie|Token của nick nhận.")
+
+    token_nhan: Optional[str] = None
+    id_acc_nhan = ""
+    name_acc_nhan = ""
+    target_page_ids: Set[str] = set()
+
+    while True:
+        raw_nhan = input("Nhập UID (hoặc Token) của nick muốn nhận Page: ").strip()
+        if not raw_nhan:
+            safe_print("Vui lòng không để trống.")
+            continue
+
+        if raw_nhan.isdigit() and 5 <= len(raw_nhan) <= 22:
+            id_acc_nhan = raw_nhan
+            name_acc_nhan = f"UID {id_acc_nhan}"
+            token_nhan = None
+            safe_print(
+                f"{Colors.GREEN}✓ Đã nhận UID đích: {id_acc_nhan} "
+                f"(Chế độ chỉ dùng UID -> Chạy Bước 1 + Bước 2 bắn lời mời Full Admin sang UID {id_acc_nhan}!){Colors.RESET}"
+            )
+            break
+
+        targets = parse_holder_target(raw_nhan)
+        if targets:
+            t0 = targets[0]
+            t_uid = t0.get("uid") or ""
+            t_tok = t0.get("token")
+
+            if t_tok:
+                info_nhan = get_id(t_tok, proxy=t0.get("proxy"))
+                if info_nhan:
+                    id_acc_nhan, name_acc_nhan = info_nhan
+                    token_nhan = t_tok
+                    safe_print(f"{Colors.GREEN}✓ Tài khoản nhận: {name_acc_nhan} (ID: {id_acc_nhan}) -> Chế độ Full 4 Bước Auto Accept!{Colors.RESET}")
+                    target_page_ids = get_managed_page_ids(token_nhan)
+                    if target_page_ids:
+                        safe_print(f"{Colors.GREEN}✓ Nick nhận đang quản lý {len(target_page_ids)} Page (Sẽ tự bỏ qua nếu trùng).{Colors.RESET}")
+                    break
+                elif t_uid:
+                    id_acc_nhan = t_uid
+                    name_acc_nhan = f"UID {id_acc_nhan}"
+                    token_nhan = None
+                    safe_print(f"{Colors.YELLOW}! Token nick nhận không hợp lệ -> Chuyển sang chế độ chỉ bắn lời mời tới UID: {id_acc_nhan}{Colors.RESET}")
+                    break
+
+            if t_uid:
+                id_acc_nhan = t_uid
+                name_acc_nhan = f"UID {id_acc_nhan}"
+                token_nhan = None
+                safe_print(
+                    f"{Colors.GREEN}✓ Đã nhận UID đích: {id_acc_nhan} "
+                    f"(Chế độ chỉ dùng UID -> Chạy Bước 1 + Bước 2 bắn lời mời Full Admin!){Colors.RESET}"
+                )
+                break
+
+        safe_print(f"{Colors.RED}✗ Dữ liệu không hợp lệ. Hãy nhập UID (dãy số) hoặc Token của nick nhận.{Colors.RESET}")
+
     while True:
         delay_str = input("\nNhập số giây delay giữa các lần chuyển Page (mặc định 2, nhập 0 để không delay): ").strip() or "2"
         try:
@@ -3215,9 +3341,8 @@ def run_standalone_super_transfer_menu():
             pass
         safe_print("Vui lòng nhập số >= 0.")
 
-    # ===== BƯỚC 4: BẮT ĐẦU CHUYỂN =====
     total = sum(len(acc["pages"]) for acc in source_accounts)
-    safe_print(f"\n{Colors.GREEN}{Colors.BOLD}===== BẮT ĐẦU CHUYỂN {total} PAGE TỪ {len(source_accounts)} TÀI KHOẢN NGUỒN ====={Colors.RESET}")
+    safe_print(f"\n{Colors.GREEN}{Colors.BOLD}===== BẮT ĐẦU CHUYỂN {total} PAGE SANG {name_acc_nhan} ({id_acc_nhan}) ====={Colors.RESET}")
 
     success_count = 0
     fail_count = 0
@@ -3231,7 +3356,7 @@ def run_standalone_super_transfer_menu():
         src_token = acc.get("token", "")
         src_proxy = acc.get("proxy")
 
-        safe_print(f"\n{Colors.CYAN}--- Tài khoản nguồn: {name_acc_src} (UID: {id_acc_src}) ---{Colors.RESET}")
+        safe_print(f"\n{Colors.CYAN}--- Nick cầm Page: {name_acc_src} (UID: {id_acc_src}) ---{Colors.RESET}")
 
         for page in acc["pages"]:
             processed += 1
@@ -3266,7 +3391,7 @@ def run_standalone_super_transfer_menu():
 
             now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             if tr_res.get("status") == "SUCCESS":
-                msg = f"✅ Page {page_name}: Chuyển quyền & Auto Accept thành công!"
+                msg = f"✅ Page '{page_name}': Đã chuyển quyền & Auto Accept thành công sang {id_acc_nhan}!"
                 safe_print(f"{Colors.GREEN}{Colors.BOLD}{msg}{Colors.RESET}")
                 logger.info(msg)
                 success_count += 1
@@ -3275,14 +3400,20 @@ def run_standalone_super_transfer_menu():
                 with open("output_chuyen_page.txt", "a", encoding="utf-8") as f:
                     f.write(f"{now_str}|SUCCESS|{page_id}|{page_uid}|{page_name}|From:{id_acc_src}|To:{id_acc_nhan}\n")
             elif tr_res.get("status") == "INVITED_ONLY":
-                msg = f"⚠️ Page {page_name}: {tr_res.get('message')}"
-                safe_print(f"{Colors.YELLOW}{msg}{Colors.RESET}")
-                logger.warning(msg)
-                fail_count += 1
+                if not token_nhan:
+                    msg = f"✅ Page '{page_name}': Đã bắn lời mời Full Admin thành công sang UID {id_acc_nhan}!"
+                    safe_print(f"{Colors.GREEN}{Colors.BOLD}{msg}{Colors.RESET}")
+                    logger.info(msg)
+                    success_count += 1
+                else:
+                    msg = f"⚠️ Page '{page_name}': {tr_res.get('message')}"
+                    safe_print(f"{Colors.YELLOW}{msg}{Colors.RESET}")
+                    logger.warning(msg)
+                    fail_count += 1
                 with open("output_chuyen_page.txt", "a", encoding="utf-8") as f:
                     f.write(f"{now_str}|INVITED_ONLY|{page_id}|{page_uid}|{page_name}|From:{id_acc_src}|To:{id_acc_nhan}|{tr_res.get('message')}\n")
             else:
-                msg = f"❌ Page {page_name}: {tr_res.get('message')}"
+                msg = f"❌ Page '{page_name}': {tr_res.get('message')}"
                 safe_print(f"{Colors.RED}{msg}{Colors.RESET}")
                 logger.error(msg)
                 fail_count += 1
@@ -3291,12 +3422,13 @@ def run_standalone_super_transfer_menu():
                 sleep_with_countdown(delay)
 
     safe_print(f"\n{Colors.GREEN}{Colors.BOLD}===== KẾT QUẢ TỔNG KẾT ====={Colors.RESET}")
-    safe_print(f"- Tổng số tài khoản nguồn: {len(source_accounts)}")
-    safe_print(f"- Thành công (Full Admin): {Colors.GREEN}{success_count} Page{Colors.RESET}")
-    safe_print(f"- Thất bại / Chưa nhận:    {Colors.RED}{fail_count} Page{Colors.RESET}")
-    safe_print(f"- Bỏ qua (đã có quyền):    {Colors.YELLOW}{skip_count} Page{Colors.RESET}")
-    safe_print(f"- File kết quả:            {Colors.CYAN}output_chuyen_page.txt{Colors.RESET}")
-    safe_print(f"- File log chi tiết:       {Colors.CYAN}transfer_page.log{Colors.RESET}")
+    safe_print(f"- Tổng số tài khoản nguồn:     {len(source_accounts)}")
+    safe_print(f"- Thành công (Đã bắn/Accept):  {Colors.GREEN}{success_count} Page{Colors.RESET}")
+    safe_print(f"- Thất bại:                    {Colors.RED}{fail_count} Page{Colors.RESET}")
+    safe_print(f"- Bỏ qua (đã có quyền):        {Colors.YELLOW}{skip_count} Page{Colors.RESET}")
+    safe_print(f"- File kết quả:                {Colors.CYAN}output_chuyen_page.txt{Colors.RESET}")
+    if not token_nhan and success_count > 0:
+        safe_print(f"- Link chấp nhận lời mời bên nick {id_acc_nhan}: {Colors.YELLOW}https://www.facebook.com/pages/?category=invites{Colors.RESET}")
     input("\nNhấn Enter để quay lại menu chính...")
 
 
@@ -3387,7 +3519,7 @@ def main():
         print_banner()
         safe_print(f"{Colors.BOLD}VUI LÒNG CHỌN CHỨC NĂNG:{Colors.RESET}")
         safe_print(f"{Colors.GREEN}[1] REG PAGE PRO5 VIP (CORE V5) -> REG XONG PAGE NÀO CHECK & CHUYỂN LUÔN PAGE ĐÓ{Colors.RESET}")
-        safe_print(f"{Colors.CYAN}[2] CHUYỂN QUYỀN QUẢN TRỊ PAGE SIÊU MẠNH ĐỘC LẬP (CHỌN PAGE 1-5, ALL / ĐỌC FILE){Colors.RESET}")
+        safe_print(f"{Colors.CYAN}[2] QUÉT PAGE TỪ NICK CẦM PAGE -> CHUYỂN SANG NICK KHÁC (CHỈ CẦN UID HOẶC KÈM TOKEN){Colors.RESET}")
         safe_print(f"{Colors.YELLOW}[3] GET TOKEN EAAAAU TỪ UID|PASS|COOKIE / 2FA (BLOKS CAA V5){Colors.RESET}")
         safe_print(f"{Colors.RED}[0] THOÁT TOOL{Colors.RESET}\n")
 
