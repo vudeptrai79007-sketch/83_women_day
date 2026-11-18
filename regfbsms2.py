@@ -7264,25 +7264,83 @@ if __name__ == "__main__":
         else:
             AppLogger.warn(f"[PSTMMO] Không kiểm tra được số dư: {u_info}")
 
+        ref_prices = {
+            "gmail.com": "1.232 đ",
+            "gmx.com": "53 đ",
+            "mail.com": "53 đ",
+            "email.com": "53 đ",
+            "hotmail.com": "53 đ",
+            "outlook.com": "53 đ",
+            "icloud.com": "352 đ",
+            "yandex.com": "176 đ",
+            "yandex.ru": "176 đ",
+            "ya.ru": "176 đ",
+            "gmx.ru": "53 đ",
+            "gmx.se": "53 đ",
+            "yandex.fi": "176 đ",
+            "yandex.ee": "176 đ",
+            "yandex.kg": "176 đ",
+            "yandex.tm": "176 đ",
+            "yandex.com.ge": "176 đ",
+            "yandex.by": "176 đ",
+            "yandex.lt": "176 đ",
+            "yandex.co.il": "176 đ",
+            "yandex.com.am": "176 đ",
+            "yandex.uz": "176 đ",
+            "yandex.fr": "176 đ",
+            "yandex.tj": "176 đ",
+            "yandex.az": "176 đ",
+            "yandex.pl": "176 đ",
+            "yandex.kz": "176 đ",
+            "yandex.md": "176 đ",
+        }
+
         ok_s, svcs = pst_client.get_services()
         fb_domains = []
+        fb_price_str = "53 đ"
         if ok_s and isinstance(svcs, list):
             for s in svcs:
                 if str(s.get("code") or "").lower() == "facebook" or "facebook" in str(s.get("site") or "").lower():
                     fb_domains = s.get("supported_domains") or []
-                    print(f"[+] Kho Facebook: {s.get('available_quantity', 0)} mail | Giá: {s.get('price_formatted', s.get('price'))}")
-                    if fb_domains:
-                        print(f"[+] Đuôi hỗ trợ: {', '.join(fb_domains)}")
+                    fb_price_str = str(s.get("price_formatted") or s.get("price") or "53 đ")
+                    print(f"[+] Kho Facebook: {s.get('available_quantity', 0):,} mail | Giá cơ bản: {fb_price_str}")
                     break
 
-        dom_hint = f"Enter = '{_saved_dom or 'AUTO'}', '-' = để hệ thống tự chọn"
-        dom_in = input(f"[?] Chọn đuôi domain (vd: gmx.com, mail.com, gmail.com | {dom_hint}): ").strip()
-        if dom_in == "-":
-            chosen_domain = ""
-        elif dom_in:
-            chosen_domain = dom_in.lstrip("@")
-        else:
+        domain_catalog = []
+        for d in fb_domains:
+            d_clean = str(d).strip().lower()
+            if d_clean and d_clean not in domain_catalog:
+                domain_catalog.append(d_clean)
+        for d in ref_prices.keys():
+            if d not in domain_catalog:
+                domain_catalog.append(d)
+
+        print("\n" + color("-" * 72, C.DGRAY))
+        print(color("📌 BẢNG CHỌN ĐUÔI EMAIL PSTMMO:", C.BYELLOW + C.BOLD))
+        print(f"  {color(' 0.', C.LIME)} {'AUTO (Tự chọn đuôi sẵn hàng nhất)':<34} | Khuyên dùng")
+        for idx, dom in enumerate(domain_catalog, 1):
+            p_label = ref_prices.get(dom, fb_price_str)
+            in_api_tag = " [Sẵn kho FB]" if dom in fb_domains else ""
+            saved_tag = " <- đang lưu" if dom == _saved_dom else ""
+            print(f"  {idx:>2}. @{dom:<20} {p_label:>10}/mail{in_api_tag}{saved_tag}")
+        print(color("-" * 72, C.DGRAY))
+
+        default_label = f"@{_saved_dom}" if _saved_dom else "0 = AUTO"
+        dom_in = input(color(f"[?] Nhập số thứ tự (0-{len(domain_catalog)}) hoặc tên đuôi (Enter = {default_label}): ", C.BWHITE + C.BOLD)).strip()
+
+        if not dom_in:
             chosen_domain = _saved_dom
+        elif dom_in in ("0", "-", "auto", "AUTO"):
+            chosen_domain = ""
+        elif dom_in.isdigit() and 1 <= int(dom_in) <= len(domain_catalog):
+            chosen_domain = domain_catalog[int(dom_in) - 1]
+        else:
+            chosen_domain = dom_in.lstrip("@").lower()
+
+        if chosen_domain:
+            AppLogger.success(f"Đã chọn thuê đuôi: @{chosen_domain}")
+        else:
+            AppLogger.success("Đã chọn chế độ: AUTO (Hệ thống tự cấp đuôi sẵn hàng nhất)")
 
         pstmmo_save_config(api_key=pk, domain=chosen_domain)
 
@@ -7329,7 +7387,7 @@ if __name__ == "__main__":
         print("\n" + color("=" * 72, C.BGREEN))
         print("📊 CẤU HÌNH PSTMMO REG:")
         print(f"   • Mode:       MỒI SĐT -> EMAIL PSTMMO (mail.pstmmo.cc)")
-        print(f"   • Domain:     {chosen_domain or 'Tự chọn sẵn hàng (Auto)'}")
+        print(f"   • Domain:     {('@' + chosen_domain) if chosen_domain else 'Tự chọn sẵn hàng (Auto)'}")
         print(f"   • Resend:     {resend_times} lần")
         print(f"   • Luồng:      {max_workers} | Mục tiêu LIVE: {num_acc}")
         print(f"   • Mạng:       {network_mode_label}")
