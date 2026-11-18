@@ -1597,7 +1597,7 @@ def execute_super_transfer(
 
     return res_out
   # ==============================================================================
-# 6. CÁC HÀM HỖ TRỢ CHỌN PAGE & LÕI REG PAGE PRO5 VIP V5
+# 6. CÁC HÀM HỖ TRỢ CHỌN PAGE & LÕI REG PAGE PRO5 VIP V5 (CHỐNG TREO BƯỚC 3)
 # ==============================================================================
 
 def parse_selection(selection_str: str, max_index: int) -> List[int]:
@@ -1791,13 +1791,29 @@ class FbPageCreator:
         except Exception as e:
             return {"success": False, "message": str(e)}
 
+    @staticmethod
+    def _decode_fb_body(resp: requests.Response) -> str:
+        """Giải mã toàn bộ chuỗi Unicode Escape (\\uXXXX) trong JSON GraphQL để bắt chính xác lỗi tiếng Việt."""
+        raw_text = resp.text or ""
+        try:
+            decoded_json = json.dumps(resp.json(), ensure_ascii=False)
+            return raw_text + "\n" + decoded_json
+        except Exception:
+            try:
+                return raw_text + "\n" + raw_text.encode("utf-8").decode("unicode_escape", errors="ignore")
+            except Exception:
+                return raw_text
+
     def create_page_and_get_token(
         self,
         page_name: str,
         known_page_ids: set,
         step_callback=None
     ) -> Dict[str, Any]:
-        """Tạo Page Pro5 chuẩn Katana + Bắt Page mới qua bk.action.i64.Const & ProfileSwitcherQuery."""
+        """
+        Tạo Page Pro5 chuẩn Katana + Kiểm tra ngay bk.action.i64.Const ở Bước 2.
+        Nếu Facebook từ chối cấp ID Page mới -> Báo Limit/Xịt ngay trong 2 giây, không treo 15-20s.
+        """
         if self.ua_mode == "random":
             self.user_agent = generate_random_katana_ua()
 
@@ -1836,11 +1852,12 @@ class FbPageCreator:
         }
 
         try:
-            r1 = self.session.post(GRAPHQL_URL, headers=self._get_headers(d1["fb_api_req_friendly_name"]), data=d1, timeout=30)
-            body1 = r1.text
-            if "OAuthException" in body1 or r1.status_code == 401:
+            r1 = self.session.post(GRAPHQL_URL, headers=self._get_headers(d1["fb_api_req_friendly_name"]), data=d1, timeout=25)
+            body1 = self._decode_fb_body(r1)
+            body1_low = body1.lower()
+            if "oauthexception" in body1_low or r1.status_code == 401:
                 return {"success": False, "is_token_die": True, "message": "Token DIE ở Bước 1 (Submit Name)"}
-            if "tên này không hợp lệ" in body1.lower() or "name is invalid" in body1.lower():
+            if any(k in body1_low for k in ["tên này không hợp lệ", "name is invalid", "không hợp lệ", "chọn tên khác"]):
                 return {"success": False, "is_name_invalid": True, "message": f"Tên Page '{page_name}' không hợp lệ"}
         except Exception as e:
             return {"success": False, "message": f"Lỗi mạng Bước 1: {e}"}
@@ -1886,29 +1903,34 @@ class FbPageCreator:
 
         body2 = ""
         try:
-            r2 = self.session.post(GRAPHQL_URL, headers=self._get_headers(d2["fb_api_req_friendly_name"]), data=d2, timeout=30)
-            body2 = r2.text
+            r2 = self.session.post(GRAPHQL_URL, headers=self._get_headers(d2["fb_api_req_friendly_name"]), data=d2, timeout=25)
+            body2 = self._decode_fb_body(r2)
+            body2_low = body2.lower()
 
-            if "OAuthException" in body2 or r2.status_code == 401 or "Session expired" in body2:
+            if "oauthexception" in body2_low or r2.status_code == 401 or "session expired" in body2_low:
                 return {"success": False, "is_token_die": True, "message": "Token DIE ở Bước 2 (Submit Category)"}
 
-            if "tạo quá nhiều trang" in body2.lower() or "too many" in body2.lower() or "thử lại sau" in body2.lower():
+            if any(k in body2_low for k in ["tạo quá nhiều trang", "too many", "thử lại sau", "try again later", "giới hạn", "limit"]):
                 return {"success": False, "is_limit": True, "message": "Gần đây bạn đã tạo quá nhiều Trang (Limit)."}
 
-            if '"severity":"CRITICAL"' in body2 or "field_exception" in body2 or '"fb_bloks_action":null' in body2:
+            if '"severity":"critical"' in body2_low or "field_exception" in body2_low or '"fb_bloks_action":null' in body2_low:
                 return {"success": False, "is_restricted": True, "message": "Nick bị chặn tạo Page (CRITICAL)"}
         except Exception as e:
             return {"success": False, "message": f"Lỗi mạng Bước 2: {e}"}
 
-        # --- BƯỚC 3: QUÉT LẤY PAGE_UID (615... TỪ PROFILESWITCHER) & SW_TOKEN ---
+        # --- BƯỚC 3: KIỂM TRA MÃ ID PAGE MỚI TRƯỚC KHI QUÉT (CHỐNG ĐỨNG 15 GIÂY) ---
+        candidate_ids = set(re.findall(r"\(bk\.action\.i64\.Const,\s*(\d{10,})\)", body2 or ""))
+
+        # Nếu Bloks không trả về bk.action.i64.Const nào -> Chỉ quét 1 lần sau 2s rồi báo Limit/Xịt ngay!
+        max_scans = 3 if candidate_ids else 1
+        wait_scan = 2
+
         if step_callback:
             step_callback(f"Đang bóc ID & lấy Token Page Pro5 của '{page_name}'...")
 
-        candidate_ids = set(re.findall(r"\(bk\.action\.i64\.Const,\s*(\d{10,})\)", body2 or ""))
         new_page_obj = None
-
-        for _ in range(1, 5):
-            time.sleep(3)
+        for _ in range(max_scans):
+            time.sleep(wait_scan)
             scan_res = self.get_all_pages_with_tokens()
             pages_list = scan_res.get("pages", [])
 
@@ -1929,7 +1951,10 @@ class FbPageCreator:
 
             if not new_page_obj:
                 for p in pages_list:
-                    if str(p.get("name", "")).strip().lower() == page_name.strip().lower():
+                    if (
+                        str(p.get("name", "")).strip().lower() == page_name.strip().lower()
+                        and str(p.get("id", "")) not in known_page_ids
+                    ):
                         new_page_obj = p
                         break
 
@@ -1937,6 +1962,12 @@ class FbPageCreator:
                 break
 
         if not new_page_obj:
+            if not candidate_ids:
+                return {
+                    "success": False,
+                    "is_limit": True,
+                    "message": f"Facebook không cấp thêm Page mới cho '{page_name}' (Nick đã đầy Page hoặc chạm Limit)"
+                }
             return {
                 "success": False,
                 "is_no_page": True,
@@ -2043,7 +2074,8 @@ class AccountTask:
         default_pwd: str = "",
         assigned_proxy: Optional[str] = None,
         holder_target: Optional[Dict[str, Optional[str]]] = None,
-        auto_buff_media: bool = False
+        auto_buff_media: bool = False,
+        transfer_old_pages: bool = False
     ):
         self.acc_id = acc_id
         self.pre_uid = item.get("uid") or ""
@@ -2059,6 +2091,7 @@ class AccountTask:
         self.pages_created = 0
         self.ua_mode = ua_mode
         self.auto_buff_media = auto_buff_media
+        self.transfer_old_pages = transfer_old_pages
         self.fixed_ua = generate_random_katana_ua(seed=self.token or self.pre_uid) if ua_mode == "fixed" else None
         self.creator: Optional[FbPageCreator] = None
         self.mother_uid = self.pre_uid
@@ -2145,7 +2178,7 @@ def dashboard_render_loop(accounts: List[AccountTask], stats: Dict[str, int], st
 
 
 # ==============================================================================
-# 8. LUỒNG XỬ LÝ CUỐN CHIẾU TỪNG PAGE (TẠO PAGE NÀO -> CHECK LIVE -> CHUYỂN LUÔN PAGE ĐÓ)
+# 8. LUỒNG XỬ LÝ CUỐN CHIẾU TỪNG PAGE (CHỐNG TREO & TỰ CẮT KHI XỊT/LIMIT)
 # ==============================================================================
 
 def process_single_account_workflow(
@@ -2239,8 +2272,9 @@ def process_single_account_workflow(
     acc.mother_name = acc_info.get("name", "Facebook User")
 
     pre_pages_res = acc.creator.get_all_pages_with_tokens()
+    existing_old_pages = pre_pages_res.get("pages", [])
     known_page_ids = set()
-    for p in pre_pages_res.get("pages", []):
+    for p in existing_old_pages:
         if p.get("id"):
             known_page_ids.add(str(p["id"]))
         if p.get("additional_profile_id"):
@@ -2249,17 +2283,72 @@ def process_single_account_workflow(
     add_process_log(
         acc.acc_id,
         acc.mother_uid,
-        f"{Colors.GREEN}✔ Nick LIVE ({acc.mother_name}) - Có sẵn {len(pre_pages_res.get('pages', []))} Page cũ.{Colors.RESET}"
+        f"{Colors.GREEN}✔ Nick LIVE ({acc.mother_name}) - Có sẵn {len(existing_old_pages)} Page cũ.{Colors.RESET}"
     )
 
-    # --- VÒNG LẶP CUỐN CHIẾU TỪNG PAGE: REG -> CHECK LIVE -> CHUYỂN LUÔN -> LƯU FILE ---
     has_counted_holder_acc = False
     page_summary_list = []
     last_transfer_note = "Đã lưu vào acc_cam_page.txt"
     hit_limit = False
     hit_restricted = False
     wait_seconds = max(1, int(verify_delay))
+    consecutive_fails = 0
 
+    # --- TÙY CHỌN: CHUYỂN LUÔN CÁC PAGE CŨ ĐANG CÓ SẴN TRONG ACC ---
+    if acc.transfer_old_pages and existing_old_pages and (acc.holder_uid or acc.holder_token):
+        add_process_log(
+            acc.acc_id,
+            acc.mother_uid,
+            f"{Colors.CYAN}🔄 Đang chuyển {len(existing_old_pages)} Page cũ có sẵn trên Acc sang Nick Mẹ...{Colors.RESET}"
+        )
+        for old_idx, old_p in enumerate(existing_old_pages, 1):
+            p_id = str(old_p.get("id", ""))
+            p_name = str(old_p.get("name", ""))
+            p_token = str(old_p.get("access_token", ""))
+            p_uid = str(old_p.get("additional_profile_id") or p_id)
+
+            def old_cb(msg_step: str):
+                acc.current_action = f"[L{thread_id}] [Page Cũ {old_idx}/{len(existing_old_pages)}] {msg_step}"
+                add_process_log(acc.acc_id, acc.mother_uid, f"🚀 [Page Cũ {old_idx}] {msg_step}")
+
+            tr_res = execute_super_transfer(
+                page_uid=p_uid,
+                page_id=p_id,
+                page_token=p_token,
+                sender_token=acc.token,
+                password=acc.password,
+                target_uid=acc.holder_uid,
+                receiver_token=acc.holder_token,
+                sender_proxy=acc.proxy,
+                receiver_proxy=acc.holder_proxy,
+                step_callback=old_cb
+            )
+            transfer_ok = tr_res.get("success", False)
+            transfer_status = tr_res.get("status", "FAILED")
+            invitation_id = tr_res.get("invitation_id") or ""
+            last_transfer_note = tr_res.get("message", "")
+
+            if transfer_ok:
+                add_process_log(acc.acc_id, acc.mother_uid, f"{Colors.GREEN}✅ [Page Cũ {old_idx}] {last_transfer_note}{Colors.RESET}")
+            else:
+                add_process_log(acc.acc_id, acc.mother_uid, f"{Colors.YELLOW}⚠️ [Page Cũ {old_idx}] {last_transfer_note}{Colors.RESET}")
+
+            acc.pages_created += 1
+            page_summary_list.append(f"{p_id}:{p_name}")
+            now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            with FILE_LOCK:
+                if not has_counted_holder_acc:
+                    stats["total_holder_acc"] += 1
+                    has_counted_holder_acc = True
+                stats["total_pages"] += 1
+                if transfer_ok:
+                    stats["total_invited"] += 1
+                tr_tag = f"{transfer_status}:{acc.holder_uid}" + (f"(InviteID:{invitation_id})" if invitation_id else "")
+                with open("acc_cam_page.txt", "a", encoding="utf-8") as f_holder:
+                    f_holder.write(f"{acc.mother_uid}|{acc.password}|{acc.token}|{p_id}|{p_uid}|{p_name}|{p_token}|{tr_tag}|{now_str}\n")
+
+    # --- VÒNG LẶP CUỐN CHIẾU TỪNG PAGE MỚI: REG -> CHECK LIVE -> CHUYỂN LUÔN -> LƯU FILE ---
     for idx in range(1, acc.target_pages + 1):
         acc.status = "running"
         page_name = get_page_name(name_type, custom_names)
@@ -2287,21 +2376,39 @@ def process_single_account_workflow(
 
         if create_res.get("is_limit"):
             hit_limit = True
-            add_process_log(acc.acc_id, acc.mother_uid, f"{Colors.YELLOW}🚫 Nick báo Limit ở Page {idx}: Đã tạo quá nhiều Trang.{Colors.RESET}")
+            err_lim = create_res.get("message", "Nick đã chạm Limit tạo Page")
+            acc.current_action = f"[L{thread_id}] Dừng Reg ở Page {idx}: {err_lim}"
+            add_process_log(acc.acc_id, acc.mother_uid, f"{Colors.YELLOW}🚫 [Page {idx}] {err_lim} -> Dừng tạo thêm!{Colors.RESET}")
             break
 
         if create_res.get("is_restricted"):
             hit_restricted = True
+            acc.current_action = f"[L{thread_id}] Nick bị chặn tạo Page (CRITICAL) ở Page {idx}"
             add_process_log(acc.acc_id, acc.mother_uid, f"{Colors.MAGENTA}⚠️ Nick bị chặn tạo Page (CRITICAL) ở Page {idx}.{Colors.RESET}")
             break
 
         if not create_res.get("success"):
+            consecutive_fails += 1
             err_detail = create_res.get("message", "Không lên Page")
+            acc.current_action = f"[L{thread_id}] Lần tạo {idx} xịt: {err_detail}"
             add_process_log(acc.acc_id, acc.mother_uid, f"{Colors.YELLOW}⚠️ Lần tạo {idx}: {err_detail}{Colors.RESET}")
+
+            if consecutive_fails >= 2:
+                hit_limit = True
+                add_process_log(
+                    acc.acc_id,
+                    acc.mother_uid,
+                    f"{Colors.YELLOW}🚫 Xịt {consecutive_fails} lần liên tiếp -> Tự động dừng Reg nick này để không treo luồng!{Colors.RESET}"
+                )
+                break
+
             if idx < acc.target_pages and delay_between_pages > 0:
-                time.sleep(delay_between_pages)
+                for s_rem in range(delay_between_pages, 0, -1):
+                    acc.current_action = f"[L{thread_id}] Lần {idx} xịt. Nghỉ {s_rem}s trước khi thử lần {idx + 1}..."
+                    time.sleep(1)
             continue
 
+        consecutive_fails = 0
         p_id = str(create_res["page_id"])
         p_name = str(create_res["page_name"])
         p_token = str(create_res["page_token"])
@@ -2447,12 +2554,12 @@ def process_single_account_workflow(
     if acc.pages_created == 0:
         if hit_limit:
             acc.status = "limit"
-            acc.current_action = "Acc bị Limit tạo Page -> Đã bỏ qua"
+            acc.current_action = f"Nick chạm Limit Page (Đang có sẵn {len(existing_old_pages)} Page cũ) -> Đã dừng"
             with FILE_LOCK:
                 stats["total_limited"] += 1
         else:
             acc.status = "no_page"
-            reason_str = "Nick bị chặn (CRITICAL)" if hit_restricted else "Tạo xong nhưng không có Page nào sống"
+            reason_str = "Nick bị chặn (CRITICAL)" if hit_restricted else "Tạo xong nhưng không có Page mới nào"
             acc.current_action = f"{reason_str} -> Lưu acc_reg_xit.txt"
             with FILE_LOCK:
                 stats["total_no_page"] += 1
@@ -2535,9 +2642,12 @@ def run_reg_page_menu():
                     safe_print(f"{Colors.GREEN}✔ Đã nhận diện UID Nick Mẹ: {t['uid']} -> Chế độ bắn lời mời Bước 1 & 2.{Colors.RESET}")
                 holder_targets.append(t)
 
+    transfer_old_pages = False
     if not holder_targets:
         safe_print(f"{Colors.YELLOW}Không cấu hình Nick Mẹ -> Chỉ tạo Page, Get Token Page và lưu vào acc_cam_page.txt.{Colors.RESET}\n")
     else:
+        old_ch = input("Nếu Acc nguồn đã có sẵn Page cũ, có chuyển luôn cả Page cũ sang Nick Mẹ không? (y/n, mặc định n): ").strip().lower()
+        transfer_old_pages = (old_ch == "y")
         safe_print("")
 
     # 2. NẠP DANH SÁCH ACC NGUỒN
@@ -2647,9 +2757,9 @@ def run_reg_page_menu():
     # 7. Số page & Thời gian đợi check Live từng Page
     safe_print(f"{Colors.CYAN}--- [7/8] SỐ PAGE TRÊN 1 ACC & THỜI GIAN ĐỢI CHECK LIVE TỪNG PAGE ---{Colors.RESET}")
     try:
-        pages_per_nick = int(input("Số lượng Page muốn reg trên 1 Acc (Mặc định 1): ").strip() or "1")
+        pages_per_nick = int(input("Số lượng Page muốn reg trên 1 Acc (Mặc định 4): ").strip() or "4")
     except ValueError:
-        pages_per_nick = 1
+        pages_per_nick = 4
 
     try:
         verify_delay = int(input("Sau khi tạo xong mỗi Page, đợi bao nhiêu giây để Check Live & Chuyển luôn? (Mặc định 10): ").strip() or "10")
@@ -2704,7 +2814,8 @@ def run_reg_page_menu():
             default_pwd=default_pwd,
             assigned_proxy=assigned_px,
             holder_target=assigned_target,
-            auto_buff_media=auto_buff_media
+            auto_buff_media=auto_buff_media,
+            transfer_old_pages=transfer_old_pages
         )
         account_tasks.append(task_obj)
         task_queue.put(task_obj)
