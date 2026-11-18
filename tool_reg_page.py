@@ -8,7 +8,7 @@ Quy trình chuẩn cho từng Acc:
 2. Tạo Page Pro5 (Hiện rõ Bước 1: Submit Tên -> Bước 2: Submit Danh mục).
 3. Tạo xong -> Quét & GET LUÔN TOKEN PAGE vừa tạo (Page ID + Page Token EAAAAU).
 4. Đợi đếm ngược 20s -> Check lại xem Tài khoản & Page vừa tạo còn SỐNG (LIVE) không.
-5. Nếu SỐNG -> Dùng thuật toán MTOOL MAX (Bloks) bắn lời mời Admin sang UID Nick Mẹ (Chờ tự bấm Chấp nhận).
+5. Nếu SỐNG -> Dùng thuật toán MTOOL MAX (Bloks) bắn lời mời Admin sang UID Nick Mẹ.
 ================================================================================
 """
 
@@ -32,10 +32,12 @@ from typing import Optional, Dict, Any, List
 
 try:
     import requests
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
     import urllib3
     urllib3.disable_warnings()
 except ImportError:
-    print("Vui lòng cài đặt requests bằng lệnh: pip install requests")
+    print("Vui lòng cài đặt requests bằng lệnh: pip install requests urllib3")
     sys.exit(1)
 
 # ==============================================================================
@@ -340,7 +342,14 @@ def login_and_get_token(acc: Dict[str, Any], custom_ua: str) -> Dict[str, Any]:
 
     s = requests.Session()
     s.verify = False
-    s.trust_env = False
+    s.trust_env = False # Ép Python không tự lấy Proxy rác của Windows
+    
+    # Cơ chế Auto-Retry khi Facebook drop connection (Tránh lỗi HTTPSConnectionPool)
+    retries = Retry(total=5, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504], allowed_methods=["HEAD", "GET", "OPTIONS", "POST"])
+    adapter = HTTPAdapter(max_retries=retries, pool_connections=100, pool_maxsize=100)
+    s.mount('http://', adapter)
+    s.mount('https://', adapter)
+
     if px := parse_proxy(proxy):
         s.proxies.update(px)
 
@@ -379,11 +388,13 @@ def login_and_get_token(acc: Dict[str, Any], custom_ua: str) -> Dict[str, Any]:
         if "access_token" in res:
             return {"success": True, "uid": str(res.get("uid", uid)), "token": res["access_token"], "name": res.get("user_storage", {}).get("name", "")}
         return {"success": False, "uid": uid, "message": res.get("error_msg", res.get("message", "Login lỗi"))}
+    except requests.exceptions.RequestException:
+        return {"success": False, "uid": uid, "message": "Lỗi Mạng hoặc Proxy Timeout"}
     except Exception as e:
         return {"success": False, "uid": uid, "message": str(e)}
 
 # ==============================================================================
-# 7. CORE REG PAGE PRO5 & THUẬT TOÁN MTOOL MAX SHARE QUYỀN CHỈ DÙNG STEP 1 VÀ STEP 2
+# 7. CORE REG PAGE PRO5 & THUẬT TOÁN MTOOL MAX SHARE QUYỀN (CHỈ GỬI LỜI MỜI)
 # ==============================================================================
 GRAPHQL_URL = "https://graph.facebook.com/graphql"
 CLIENT_DOC_ID = "11994080426203054249997361787"
@@ -403,7 +414,14 @@ class FbPageCreator:
 
         self.session = requests.Session()
         self.session.verify = False
-        self.session.trust_env = False
+        self.session.trust_env = False # Ép Python không lấy Proxy rác của Windows
+        
+        # Cơ chế Auto-Retry khi Facebook drop connection (Tránh lỗi HTTPSConnectionPool)
+        retries = Retry(total=5, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504], allowed_methods=["HEAD", "GET", "OPTIONS", "POST"])
+        adapter = HTTPAdapter(max_retries=retries, pool_connections=100, pool_maxsize=100)
+        self.session.mount('http://', adapter)
+        self.session.mount('https://', adapter)
+
         if self.proxies:
             self.session.proxies.update(self.proxies)
 
@@ -451,20 +469,19 @@ class FbPageCreator:
             r = self.session.get(
                 f"https://graph.facebook.com/me?fields=id,name&access_token={self.token}",
                 headers={"User-Agent": self.user_agent},
-                timeout=25
-            ).json()
-            if "id" in r:
-                self.mother_uid = str(r["id"])
-                return {"success": True, "uid": str(r["id"]), "name": r.get("name", "Facebook User")}
-            err = r.get("error", {})
-            err_msg = err.get("message", "Token lỗi hoặc Nick DIE")
-            is_die = (
-                "OAuthException" in str(r)
-                or err.get("code") in [190, 102]
-                or "checkpoint" in str(r).lower()
-                or "error" in r
+                timeout=15
             )
+            r_json = r.json()
+            if "id" in r_json:
+                self.mother_uid = str(r_json["id"])
+                return {"success": True, "uid": str(r_json["id"]), "name": r_json.get("name", "Facebook User")}
+            err = r_json.get("error", {})
+            err_msg = err.get("message", "Token lỗi hoặc Nick DIE")
+            is_die = "OAuthException" in r.text or "checkpoint" in r.text.lower() or "error" in r_json
             return {"success": False, "is_token_die": is_die, "message": err_msg}
+        except requests.exceptions.RequestException:
+            # Bắt riêng lỗi Proxy/Mạng để báo chữ Vàng thay vì báo đỏ Nick Die
+            return {"success": False, "is_token_die": False, "message": "Lỗi Mạng hoặc Proxy Timeout"}
         except Exception as e:
             return {"success": False, "is_token_die": False, "message": str(e)}
 
@@ -489,6 +506,8 @@ class FbPageCreator:
 
             pages = r.get("data", []) if isinstance(r.get("data"), list) else []
             return {"success": True, "is_token_die": False, "pages": pages}
+        except requests.exceptions.RequestException:
+            return {"success": False, "is_token_die": False, "pages": [], "message": "Lỗi Mạng hoặc Proxy Timeout"}
         except Exception as e:
             return {"success": False, "is_token_die": False, "pages": [], "message": str(e)}
 
@@ -573,6 +592,8 @@ class FbPageCreator:
                 return {"success": False, "is_token_die": True, "message": "Token DIE ở Bước 1 (Submit Name)"}
             if "Tên này không hợp lệ" in r1.text or "tên không hợp lệ" in r1.text.lower():
                 return {"success": False, "is_name_invalid": True, "message": f"Tên Page '{page_name}' không hợp lệ"}
+        except requests.exceptions.RequestException:
+            return {"success": False, "message": "Lỗi Mạng hoặc Proxy Timeout ở Bước 1"}
         except Exception as e:
             return {"success": False, "message": f"Lỗi mạng ở Bước 1: {e}"}
 
@@ -627,6 +648,8 @@ class FbPageCreator:
 
             if '"severity":"CRITICAL"' in res2 or "field_exception" in res2 or '"fb_bloks_action":null' in res2:
                 return {"success": False, "is_restricted": True, "message": "Nick bị chặn tạo Page (CRITICAL)"}
+        except requests.exceptions.RequestException:
+            return {"success": False, "message": "Lỗi Mạng hoặc Proxy Timeout ở Bước 2"}
         except Exception as e:
             return {"success": False, "message": f"Lỗi mạng ở Bước 2: {e}"}
 
@@ -770,6 +793,8 @@ class FbPageCreator:
             if "errors" in r:
                 return {"success": False, "message": f"MTool lỗi: {r['errors'][0].get('message', 'Lỗi không xác định')[:40]}"}
             return {"success": True, "message": f"Đã bắn lời mời FULL_ACCESS sang UID {holder_uid} (Chờ Chấp nhận thủ công)"}
+        except requests.exceptions.RequestException:
+            return {"success": False, "message": "Lỗi Mạng hoặc Proxy Timeout khi bắn MTool"}
         except Exception as e:
             return {"success": False, "message": f"Lỗi Gửi Yêu Cầu MTool: {str(e)[:40]}"}
 
@@ -986,7 +1011,7 @@ def process_single_account_workflow(
 
         if idx < acc.target_pages and delay_between_pages > 0:
             for s_rem in range(delay_between_pages, 0, -1):
-                acc.current_action = f"[L{thread_id}] Nghỉ {s_rem}s trước khi tạo Page ({idx + 1}/{acc.target_pages})..."
+                acc.current_action = f"[L{thread_id}] Nghỉ {s_rem}s trước khi tạo Page ({idx + 1}/{acc.target_pages})...."
                 time.sleep(1)
 
     if not newly_created_pages:
