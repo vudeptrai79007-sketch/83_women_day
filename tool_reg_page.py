@@ -142,7 +142,7 @@ def _is_valid_host(host_str: str) -> bool:
     # IPv6
     if ":" in h and re.match(r"^[0-9a-fA-F:]+$", h):
         return True
-    # Tên miền (phải có dấu chấm và đuôi chữ cái)
+    # Tên miền
     if re.match(r"^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", h):
         return True
     return False
@@ -157,7 +157,7 @@ def parse_proxy(proxy_str: Optional[str]) -> Optional[Dict[str, str]]:
         return None
     raw = str(proxy_str).strip()
 
-    if any(k in raw for k in ["c_user=", "xs=", "datr=", "EAAAA", "EAAG", " "|""]):
+    if any(k in raw for k in ["c_user=", "xs=", "datr=", "EAAAA", "EAAG", " ", "|"]):
         return None
 
     scheme = "http"
@@ -194,7 +194,6 @@ def parse_proxy(proxy_str: Optional[str]) -> Optional[Dict[str, str]]:
                 elif _is_valid_host(parts[2]) and _is_valid_port(parts[3]):
                     user, password, host, port = parts[0], parts[1], parts[2], parts[3]
             elif len(parts) > 4:
-                # Hỗ trợ IPv6 không ngoặc: ipv6:port:user:pass hoặc ipv6:port
                 if _is_valid_port(parts[-3]):
                     ipv6_cand = ":".join(parts[:-3])
                     if _is_valid_host(ipv6_cand):
@@ -354,7 +353,6 @@ def get_page_name(name_type: str = "viet", custom_names: Optional[List[str]] = N
 def _is_2fa_secret(s: str) -> bool:
     clean = s.replace(" ", "")
     if len(clean) in (16, 24, 32) and re.match(r"^[A-Z2-7a-z]+=*$", clean):
-        # Tránh nhầm mật khẩu thường không viết hoa toàn bộ thành 2FA
         if clean.isupper() or (len(clean) == 32 and clean.isalnum()):
             return True
     return False
@@ -408,20 +406,16 @@ def parse_token_line(line: str) -> Optional[Dict[str, str]]:
             continue
         if p.startswith(("DIE_", "KHONG_LEN", "PAGE_", "DA_BAN", "LOI_BAN")):
             continue
-        # Kiểm tra ngày giờ log
         if re.match(r"^\d{4}-\d{2}-\d{2}", p):
             continue
 
-        # Kiểm tra Proxy thật
         if not proxy and parse_proxy(p):
             proxy = p
             continue
 
-        # Kiểm tra 2FA
         if _is_2fa_secret(p):
             continue
 
-        # Phần còn lại chính là Password của tài khoản
         if not pwd and len(p) >= 4:
             pwd = p
 
@@ -454,7 +448,6 @@ def parse_holder_target(raw_input: str) -> List[Dict[str, Optional[str]]]:
     if not raw_input or not raw_input.strip():
         return targets
 
-    # Tách theo dòng hoặc dấu phẩy/chấm phẩy (nếu chỉ nhập danh sách UID)
     chunks = [c.strip() for c in re.split(r"[\n,;]+", raw_input) if c.strip()]
     for chunk in chunks:
         uid = None
@@ -739,10 +732,9 @@ class FacebookAdminManager:
                                 return tokens[0]
         except Exception:
             pass
-        # Tìm dự phòng bằng regex trên toàn bộ JSON nếu cấu trúc bundle thay đổi nhẹ
         try:
             raw_str = json.dumps(resp_json)
-            m = re.search(r'invitation_id[^\d]+(\d{8,25})', raw_str)
+            m = re.search(r"invitation_id[^\d]+(\d{8,25})", raw_str)
             if m:
                 return m.group(1)
         except Exception:
@@ -893,10 +885,6 @@ class FacebookAdminManager:
         page_token: str = "",
         step_callback=None
     ) -> dict:
-        """
-        Thực thi quy trình 4 Bước MTool Max:
-        - Tự động thử qua các cặp (profile_id, token) để tương thích cả Page ID lẫn Additional Profile ID.
-        """
         result = {
             "success": False,
             "page_id": page_id,
@@ -906,20 +894,17 @@ class FacebookAdminManager:
             "message": "",
         }
 
-        # Danh sách ID đại diện cho Page Pro5 (ưu tiên additional_profile_id hoặc page_id)
         candidate_profile_ids = []
         for pid in [page_id, additional_profile_id]:
             if pid and str(pid) not in candidate_profile_ids:
                 candidate_profile_ids.append(str(pid))
 
-        # Danh sách Token gửi (ưu tiên sender_token của Nick cầm Page như chuẩn MTool, dự phòng page_token)
         candidate_tokens = []
         for tk in [sender_token, page_token]:
             if tk and str(tk) not in candidate_tokens:
                 candidate_tokens.append(str(tk))
 
         step12_ok = False
-        active_pid = page_id
         last_err = ""
 
         for pid in candidate_profile_ids:
@@ -942,7 +927,6 @@ class FacebookAdminManager:
                         continue
 
                     step12_ok = True
-                    active_pid = pid
                     break
                 except Exception as e:
                     last_err = str(e)
@@ -951,22 +935,19 @@ class FacebookAdminManager:
             result["message"] = last_err or "Không thể thực hiện Step 1 & Step 2 MTool"
             return result
 
-        # Nếu chỉ nhập UID Nick Mẹ (không có Token Nick Mẹ để Auto Accept) -> Hoàn tất tại Bước 2
         if not auto_accept or not receiver_token:
             result["success"] = True
             result["status"] = "INVITED_ONLY"
             result["message"] = f"Đã bắn thông báo mời Admin (MTool Step 2) sang UID {target_uid}"
             return result
 
-        # Đợi 5 giây như trong Lw2/o.m() của MTool Max để Facebook tạo thông báo lời mời
         for remaining in range(5, 0, -1):
             if step_callback:
                 step_callback(f"MTool: Đã bắn lời mời! Chờ {remaining}s để lấy invitation_id...")
             time.sleep(1)
 
-        # --- BƯỚC 3: LẤY INVITATION_ID BÊN ACC NHẬN ---
         if step_callback:
-            step_callback(f"MTool Step 3: Đang dùng Token Mẹ lấy invitation_id...")
+            step_callback("MTool Step 3: Đang dùng Token Mẹ lấy invitation_id...")
 
         invitation_id = None
         for pid in candidate_profile_ids:
@@ -986,7 +967,6 @@ class FacebookAdminManager:
 
         result["invitation_id"] = invitation_id
 
-        # --- BƯỚC 4: TỰ ĐỘNG CHẤP NHẬN LỜI MỜI ---
         if step_callback:
             step_callback(f"MTool Step 4: Đang Auto Accept lời mời ({invitation_id})...")
 
@@ -1318,7 +1298,6 @@ class FbPageCreator:
         """
         holder_uid = str(holder_uid).strip()
         if not holder_uid and holder_token:
-            # Tự lấy UID Nick Mẹ nếu chỉ truyền Token Nick Mẹ
             try:
                 r_me = requests.get(
                     f"https://graph.facebook.com/me?fields=id&access_token={holder_token}",
@@ -1355,12 +1334,11 @@ class FbPageCreator:
                     "invitation_id": mtool_res.get("invitation_id"),
                     "message": mtool_res.get("message")
                 }
-            # Nếu MTool báo lỗi, lưu lại thông báo lỗi để hiển thị rõ
             mtool_err = mtool_res.get("message", "Lỗi MTool")
         else:
             mtool_err = "Thiếu mật khẩu Nick Reg cho Step 1 MTool"
 
-        # 2. Dự phòng (Fallback) qua GraphQL / Graph API nếu người dùng không nhập Password
+        # 2. Dự phòng (Fallback) qua GraphQL nếu người dùng không nhập Password
         if step_callback:
             step_callback(f"Đang thử phương thức dự phòng cho UID {holder_uid} ({mtool_err[:35]})...")
 
