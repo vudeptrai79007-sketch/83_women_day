@@ -1,13 +1,17 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-TOOL REG PAGE PRO5 VIP V5 + CHUYỂN PAGE & AUTO ACCEPT 4 BƯỚC (MTOOL MAX)
+TOOL REG PAGE PRO5 VIP (CORE V5) + CHUYỂN PAGE SIÊU MẠNH (TRÍCH XUẤT NT_BUNDLE_TREE)
 - Đầu vào đa năng: Nhận mọi biến thể (UID|Pass|Cookie|Token, UID|Pass|Token,
   UID|Pass|Cookie, UID|Pass|2FA, Token|Proxy...).
-- Nếu Acc chưa có Token EAAAAU -> Tự động Login Bloks CAA v5 lấy Token.
-- Reg Page Pro5 chuẩn Katana + Regex i64.Const + ProfileSwitcherRootQuery.
-- Hỗ trợ tự động Up Avatar, Ảnh Bìa, Đăng bài Welcome cho Page mới.
-- Đợi Check Live Acc & Page -> Bắn Admin & Auto Accept 4 bước MTool Max.
+- Tự động Login Bloks CAA v5 lấy Token EAAAAU nếu dòng acc chưa có sẵn Token.
+- Reg Page Pro5 chuẩn Katana + Regex i64.Const + ProfileSwitcherQuery (/v24.0).
+- Chuyển Page & Auto Accept 4 Bước Siêu Mạnh:
+    + Bước 1: Xác thực mật khẩu bằng Page Token & lấy động nt_bundle_tree.
+    + Bước 2: Trích xuất URL permissions/update động từ nt_bundle_tree & gửi lời mời.
+    + Bước 3: Quét invitation_id bên tài khoản đích (Nick Mẹ).
+    + Bước 4: Tự động chấp nhận lời mời (Auto Accept Full Admin).
 ================================================================================
 """
 
@@ -24,12 +28,13 @@ import base64
 import hmac
 import hashlib
 import struct
+import logging
 import datetime
 import threading
 import urllib.parse
 from collections import deque
 from queue import Queue, Empty
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple, Set
 
 try:
     import requests
@@ -41,8 +46,18 @@ except ImportError:
 
 
 # ==============================================================================
-# 1. CẤU HÌNH MÀU SẮC TERMINAL & NHẬT KÝ TIẾN TRÌNH (LIVE LOGS)
+# 1. CẤU HÌNH LOGGING, MÀU SẮC TERMINAL & NHẬT KÝ TIẾN TRÌNH (LIVE LOGS)
 # ==============================================================================
+
+logger = logging.getLogger("RegTransferVIP")
+logger.setLevel(logging.DEBUG)
+if not logger.handlers:
+    file_handler = logging.FileHandler("transfer_page.log", encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
 
 class Colors:
     RESET = "\033[0m"
@@ -77,6 +92,8 @@ def add_process_log(acc_id: int, uid: str, msg: str):
     log_line = f"[{now_str}] [Acc #{acc_id:02d} | {short_uid}] {msg}"
     with LOG_LOCK:
         LIVE_PROCESS_LOGS.append(log_line)
+    clean_log = re.sub(r"\033\[[0-9;]*m", "", log_line)
+    logger.info(clean_log)
 
 
 def clear_screen():
@@ -86,10 +103,10 @@ def clear_screen():
 def print_banner():
     clear_screen()
     safe_print(f"{Colors.CYAN}{Colors.BOLD}")
-    safe_print("=" * 98)
-    safe_print("   TOOL REG PAGE PRO5 VIP (CORE V5) + CHUYỂN PAGE & AUTO ACCEPT FULL 4 BƯỚC (MTOOL MAX)   ")
-    safe_print("    Nhận Mọi Định Dạng Acc (UID|Pass|Cookie|Token) | Tự Get Token | Bắt Page ProfileSwitcher    ")
-    safe_print("=" * 98)
+    safe_print("=" * 100)
+    safe_print("   TOOL REG PAGE PRO5 VIP (V5) + CHUYỂN PAGE SIÊU MẠNH (DYNAMIC NT_BUNDLE_TREE 4 BƯỚC)   ")
+    safe_print("   Đầu Vào Đa Năng (UID|Pass|Cookie|Token) | Tự Get Token | Bắt Page ProfileSwitcher v24.0   ")
+    safe_print("=" * 100)
     safe_print(f"{Colors.RESET}")
 
 
@@ -115,8 +132,18 @@ def input_multiline(prompt: str) -> List[str]:
     return lines
 
 
+def sleep_with_countdown(seconds: float):
+    if seconds <= 0:
+        return
+    with PRINT_LOCK:
+        print(f"Chờ {seconds} giây...", end="", flush=True)
+    time.sleep(seconds)
+    with PRINT_LOCK:
+        print("\r" + " " * 40 + "\r", end="", flush=True)
+
+
 # ==============================================================================
-# 2. BỘ LỌC PROXY & ĐẦU VÀO ĐA NĂNG (NHẬN MỌI ĐỊNH DẠNG ACC)
+# 2. BỘ LỌC PROXY & ĐẦU VÀO ĐA NĂNG (CHỐNG NHẬN NHẦM PASS/COOKIE THÀNH PROXY)
 # ==============================================================================
 
 def _is_valid_port(port_str: str) -> bool:
@@ -219,12 +246,12 @@ def _is_2fa_secret(s: str) -> bool:
 
 def parse_universal_line(line: str) -> Optional[Dict[str, Any]]:
     """
-    Bóc tách thông minh mọi định dạng tài khoản ngăn cách bởi '|':
-    - 61596033431932|siam@6|c_user=...;xs=...|EAAAAU...
-    - 61596144996991|Protik@06|EAAAAU...
+    Bóc tách thông minh mọi biến thể định dạng tài khoản ngăn cách bởi '|':
+    - UID|Pass|Cookie|Token (61596033431932|siam@6|c_user=...;xs=...|EAAAAU...)
+    - UID|Pass|Token        (61596144996991|Protik@06|EAAAAU...)
     - UID|Pass|Cookie
     - UID|Pass|2FA|Cookie|Token|Proxy
-    - EAAAAU...|Proxy
+    - Token|Proxy hoặc chỉ Token
     """
     raw = str(line).strip()
     if not raw or raw.startswith("#"):
@@ -240,10 +267,9 @@ def parse_universal_line(line: str) -> Optional[Dict[str, Any]]:
     cookie = ""
     token = ""
     proxy = None
-
     used_indices = set()
 
-    # 1. Quét tìm Token (EAAAA...), Cookie (c_user= / xs=), và Proxy hợp lệ trước
+    # 1. Tách Token, Cookie và Proxy trước
     for i, p in enumerate(parts):
         tk_m = re.search(r"(EAAAA[A-Za-z0-9]{20,}|EAAG[A-Za-z0-9]{20,})", p)
         if tk_m and not token and "c_user=" not in p:
@@ -264,7 +290,7 @@ def parse_universal_line(line: str) -> Optional[Dict[str, Any]]:
             used_indices.add(i)
             continue
 
-    # 2. Quét tìm UID (chỉ gồm 7-20 chữ số)
+    # 2. Tách UID
     for i, p in enumerate(parts):
         if i in used_indices:
             continue
@@ -273,7 +299,7 @@ def parse_universal_line(line: str) -> Optional[Dict[str, Any]]:
             used_indices.add(i)
             break
 
-    # 3. Quét tìm mã 2FA (Base32 chuẩn in hoa 16/24/32 ký tự)
+    # 3. Tách 2FA
     for i, p in enumerate(parts):
         if i in used_indices:
             continue
@@ -282,7 +308,7 @@ def parse_universal_line(line: str) -> Optional[Dict[str, Any]]:
             used_indices.add(i)
             break
 
-    # 4. Quét tìm Mật khẩu (Password) từ các cột còn lại
+    # 4. Tách Password
     for i, p in enumerate(parts):
         if i in used_indices:
             continue
@@ -295,7 +321,6 @@ def parse_universal_line(line: str) -> Optional[Dict[str, Any]]:
             used_indices.add(i)
             break
 
-    # Nếu chưa bắt được UID nhưng trong raw có chuỗi UID chuẩn
     if not uid:
         u_m = re.search(r"\b(1000\d{10,12}|615\d{11,13}|\d{10,16})\b", raw)
         if u_m:
@@ -331,10 +356,10 @@ def parse_universal_lines(lines: List[str]) -> List[Dict[str, Any]]:
 
 def parse_holder_target(raw_input: str) -> List[Dict[str, Optional[str]]]:
     """
-    Hỗ trợ nhập Nick Mẹ:
-    - Chỉ UID: 1000123456789 (Chạy Step 1 + Step 2 bắn thông báo lời mời)
-    - Kèm Token Mẹ: 1000123456789|EAAAAU... (Chạy Full 4 Step + Auto Accept)
-    - Kèm Proxy Mẹ: 1000123456789|EAAAAU...|ip:port:user:pass
+    Bóc tách thông tin Nick Mẹ nhận Page:
+    - Nhập Token Nick Mẹ (EAAAAU...) -> Tự động gọi API lấy UID Nick Mẹ & bật Auto Accept Full 4 bước.
+    - Nhập UID_ME|TOKEN_ME           -> Chạy Full 4 bước Auto Accept.
+    - Nhập chỉ UID_ME                -> Chạy Bước 1 + Bước 2 (Gửi lời mời, tự bấm chấp nhận tay).
     """
     targets = []
     if not raw_input or not raw_input.strip():
@@ -358,7 +383,7 @@ def parse_holder_target(raw_input: str) -> List[Dict[str, Optional[str]]]:
 
         if not uid:
             u_m = re.search(r"\b(\d{6,20})\b", chunk)
-            if u_m:
+            if u_m and (not token or u_m.group(1) not in token):
                 uid = u_m.group(1)
 
         if uid or token:
@@ -429,11 +454,10 @@ def get_page_name(mode: str = "viet", custom: Optional[List[str]] = None) -> str
 
 
 # ==============================================================================
-# 4. HỆ THỐNG AUTO LOGIN LẤY TOKEN EAAAAU (BLOKS CAA V5 + B-API DỰ PHÒNG)
+# 4. AUTO LOGIN LẤY TOKEN EAAAAU TỪ UID|PASS|COOKIE / 2FA (BLOKS CAA V5)
 # ==============================================================================
 
 def generate_totp_code(secret: str) -> str:
-    """Tự sinh mã 2FA 6 số không cần phụ thuộc pyotp."""
     clean_secret = secret.replace(" ", "").upper()
     if len(clean_secret) == 6 and clean_secret.isdigit():
         return clean_secret
@@ -460,7 +484,7 @@ def extract_datr_from_cookie(cookie_str: str) -> str:
 
 
 class BloksCAALoginService:
-    """Cơ chế Login Bloks CAA v5 từ Reg Page Web v5 (lấy cả Token EAAAAU & Cookie mới)."""
+    """Đăng nhập Bloks CAA v5 (từ Reg Page Web v5), dùng datr từ Cookie làm machine_id."""
 
     def __init__(self, uid: str, password: str, twofa: str = "", cookie: str = "", proxy: Optional[str] = None):
         self.uid = uid
@@ -603,17 +627,11 @@ class BloksCAALoginService:
 
     def login(self) -> Dict[str, Any]:
         payload = {
-            "method": "post",
-            "pretty": "false",
-            "format": "json",
-            "server_timestamps": "true",
-            "locale": "vi_VN",
-            "purpose": "fetch",
+            "method": "post", "pretty": "false", "format": "json", "server_timestamps": "true",
+            "locale": "vi_VN", "purpose": "fetch",
             "fb_api_req_friendly_name": "FbBloksActionRootQuery-com.bloks.www.bloks.caa.login.async.send_login_request",
-            "fb_api_caller_class": "graphservice",
-            "client_doc_id": "11994080423986492941384902285",
-            "variables": self._create_variables(),
-            "fb_api_analytics_tags": '["GraphServices"]',
+            "fb_api_caller_class": "graphservice", "client_doc_id": "11994080423986492941384902285",
+            "variables": self._create_variables(), "fb_api_analytics_tags": '["GraphServices"]',
             "client_trace_id": str(uuid.uuid4())
         }
         resp = self.session.post("https://b-graph.facebook.com/graphql", headers=self._build_headers(), data=payload, timeout=30)
@@ -628,57 +646,6 @@ class BloksCAALoginService:
             two_step_ctx = ctx_m.group(1)
             mid_m = re.search(r"SaveMachineID[^A-Za-z0-9_-]+([A-Za-z0-9_-]{10,})", text)
             mid_2fa = mid_m.group(1) if mid_m else self.machine_id
-
-            # Call 2FA Entrypoint
-            ep_inner = {
-                "client_input_params": {"device_id": self.device_id, "is_whatsapp_installed": 0, "machine_id": mid_2fa},
-                "server_params": {
-                    "family_device_id": self.device_id,
-                    "device_id": self.device_id,
-                    "two_step_verification_context": two_step_ctx,
-                    "INTERNAL_INFRA_THEME": "harm_f,default,harm_f",
-                    "flow_source": "two_factor_login",
-                    "INTERNAL_INFRA_screen_id": f"{uuid.uuid4().hex[:6]}:5"
-                }
-            }
-            ep_vars = {
-                "params": json.dumps(ep_inner),
-                "bloks_versioning_id": "cb6ac324faea83da28649a4d5046c3a4f0486cb987f8ab769765e316b075a76c",
-                "is_on_load_actions_supported": True,
-                "app_id": "com.bloks.www.two_step_verification.entrypoint",
-                "using_white_navbar": True,
-                "styles_id": "55d2af294359fa6bbdb8e045ff01fc5e",
-                "pixel_ratio": 1.5,
-                "is_push_on": True,
-                "debug_tooling_metadata_token": None,
-                "is_flipper_enabled": False,
-                "theme_params": [],
-                "bloks_version": "cb6ac324faea83da28649a4d5046c3a4f0486cb987f8ab769765e316b075a76c",
-                "scale": 1,
-                "nt_context": {
-                    "using_white_navbar": True,
-                    "styles_id": "55d2af294359fa6bbdb8e045ff01fc5e",
-                    "pixel_ratio": 1.5,
-                    "is_push_on": True,
-                    "debug_tooling_metadata_token": None,
-                    "is_flipper_enabled": False,
-                    "theme_params": [],
-                    "bloks_version": "cb6ac324faea83da28649a4d5046c3a4f0486cb987f8ab769765e316b075a76c"
-                }
-            }
-            self.session.post(
-                "https://b-graph.facebook.com/graphql",
-                headers=self._build_headers(),
-                data={
-                    "method": "post", "pretty": "false", "format": "json", "server_timestamps": "true",
-                    "locale": "vi_VN", "purpose": "fetch",
-                    "fb_api_req_friendly_name": "FbBloksAppRootQuery-com.bloks.www.two_step_verification.entrypoint",
-                    "fb_api_caller_class": "graphservice", "client_doc_id": "105373461558397492702779496",
-                    "variables": json.dumps(ep_vars), "fb_api_analytics_tags": '["GraphServices"]',
-                    "client_trace_id": str(uuid.uuid4())
-                },
-                timeout=25
-            )
 
             code_6 = generate_totp_code(self.twofa)
             vf_inner = {
@@ -697,23 +664,14 @@ class BloksCAALoginService:
                 "params": json.dumps(vf_inner),
                 "bloks_versioning_id": "cb6ac324faea83da28649a4d5046c3a4f0486cb987f8ab769765e316b075a76c",
                 "app_id": "com.bloks.www.two_step_verification.verify_code.async",
-                "using_white_navbar": True,
-                "styles_id": "55d2af294359fa6bbdb8e045ff01fc5e",
-                "pixel_ratio": 1.5,
-                "is_push_on": True,
-                "debug_tooling_metadata_token": None,
-                "is_flipper_enabled": False,
-                "theme_params": [],
-                "bloks_version": "cb6ac324faea83da28649a4d5046c3a4f0486cb987f8ab769765e316b075a76c",
-                "scale": 1,
+                "using_white_navbar": True, "styles_id": "55d2af294359fa6bbdb8e045ff01fc5e",
+                "pixel_ratio": 1.5, "is_push_on": True, "debug_tooling_metadata_token": None,
+                "is_flipper_enabled": False, "theme_params": [],
+                "bloks_version": "cb6ac324faea83da28649a4d5046c3a4f0486cb987f8ab769765e316b075a76c", "scale": 1,
                 "nt_context": {
-                    "using_white_navbar": True,
-                    "styles_id": "55d2af294359fa6bbdb8e045ff01fc5e",
-                    "pixel_ratio": 1.5,
-                    "is_push_on": True,
-                    "debug_tooling_metadata_token": None,
-                    "is_flipper_enabled": False,
-                    "theme_params": [],
+                    "using_white_navbar": True, "styles_id": "55d2af294359fa6bbdb8e045ff01fc5e",
+                    "pixel_ratio": 1.5, "is_push_on": True, "debug_tooling_metadata_token": None,
+                    "is_flipper_enabled": False, "theme_params": [],
                     "bloks_version": "cb6ac324faea83da28649a4d5046c3a4f0486cb987f8ab769765e316b075a76c"
                 }
             }
@@ -742,7 +700,6 @@ class BloksCAALoginService:
 
 
 def login_and_get_token(acc: Dict[str, Any], custom_ua: Optional[str] = None) -> Dict[str, Any]:
-    """Ưu tiên đăng nhập bằng Bloks CAA v5 (có hỗ trợ datr từ Cookie), dự phòng bằng B-API."""
     uid = acc.get("uid", "")
     pwd = acc.get("pwd", "")
     twofa = acc.get("twofa", "")
@@ -752,23 +709,17 @@ def login_and_get_token(acc: Dict[str, Any], custom_ua: Optional[str] = None) ->
     if not uid or not pwd:
         return {"success": False, "uid": uid, "message": "Thiếu UID hoặc Mật khẩu để đăng nhập lấy Token"}
 
-    # 1. Thử Bloks CAA Login v5 trước
     try:
         caa = BloksCAALoginService(uid=uid, password=pwd, twofa=twofa, cookie=cookie, proxy=proxy)
         caa_res = caa.login()
         if caa_res.get("success") and caa_res.get("token"):
             return {
-                "success": True,
-                "uid": uid,
-                "pwd": pwd,
-                "token": caa_res["token"],
-                "cookie": caa_res.get("cookie", cookie),
-                "name": ""
+                "success": True, "uid": uid, "pwd": pwd,
+                "token": caa_res["token"], "cookie": caa_res.get("cookie", cookie), "name": ""
             }
     except Exception:
         pass
 
-    # 2. Dự phòng B-API Katana Login
     s = requests.Session()
     s.verify = False
     s.trust_env = False
@@ -784,31 +735,16 @@ def login_and_get_token(acc: Dict[str, Any], custom_ua: Optional[str] = None) ->
         "X-FB-Connection-Type": "WIFI",
         "X-FB-HTTP-Engine": "Liger",
     }
-
-    url = "https://b-api.facebook.com/method/auth.login"
     device_id = str(uuid.uuid4())
     data = {
-        "adid": str(uuid.uuid4()),
-        "format": "json",
-        "device_id": device_id,
-        "email": uid,
-        "password": pwd,
-        "generate_analytics_claim": "1",
-        "community_id": "",
-        "cpl": "true",
-        "try_num": "1",
-        "family_device_id": device_id,
-        "credentials_type": "password",
-        "generate_session_cookies": "1",
-        "error_detail_type": "button_with_disabled",
-        "source": "login",
-        "generate_machine_id": "1",
-        "meta_inf_fbmeta": "",
-        "advertiser_id": str(uuid.uuid4()),
-        "currently_logged_in_userid": "0",
-        "locale": "vi_VN",
-        "client_country_code": "VN",
-        "method": "auth.login",
+        "adid": str(uuid.uuid4()), "format": "json", "device_id": device_id,
+        "email": uid, "password": pwd, "generate_analytics_claim": "1",
+        "community_id": "", "cpl": "true", "try_num": "1",
+        "family_device_id": device_id, "credentials_type": "password",
+        "generate_session_cookies": "1", "error_detail_type": "button_with_disabled",
+        "source": "login", "generate_machine_id": "1", "meta_inf_fbmeta": "",
+        "advertiser_id": str(uuid.uuid4()), "currently_logged_in_userid": "0",
+        "locale": "vi_VN", "client_country_code": "VN", "method": "auth.login",
         "fb_api_req_friendly_name": "authenticate",
         "fb_api_caller_class": "com.facebook.account.login.protocol.Fb4aAuthHandler",
         "access_token": "350685531728|62f8ce9f74b12f84c123cc23437a4a32"
@@ -819,7 +755,7 @@ def login_and_get_token(acc: Dict[str, Any], custom_ua: Optional[str] = None) ->
             data["machine_id"] = datr_val
 
     try:
-        res = s.post(url, headers=headers, data=data, timeout=30).json()
+        res = s.post("https://b-api.facebook.com/method/auth.login", headers=headers, data=data, timeout=30).json()
         if res.get("error_code") in [406, 405] or "two_factor" in str(res).lower():
             if twofa:
                 err_data = res.get("error_data", {})
@@ -838,15 +774,12 @@ def login_and_get_token(acc: Dict[str, Any], custom_ua: Optional[str] = None) ->
                     data["two_factor_code"] = code_2fa
                     if first_factor:
                         data["first_factor"] = first_factor
-                    res = s.post(url, headers=headers, data=data, timeout=30).json()
+                    res = s.post("https://b-api.facebook.com/method/auth.login", headers=headers, data=data, timeout=30).json()
 
         if "access_token" in res:
             return {
-                "success": True,
-                "uid": str(res.get("uid", uid)),
-                "pwd": pwd,
-                "token": res["access_token"],
-                "cookie": cookie,
+                "success": True, "uid": str(res.get("uid", uid)), "pwd": pwd,
+                "token": res["access_token"], "cookie": cookie,
                 "name": res.get("user_storage", {}).get("name", "")
             }
         err = res.get("error_msg") or res.get("message") or str(res)
@@ -856,360 +789,900 @@ def login_and_get_token(acc: Dict[str, Any], custom_ua: Optional[str] = None) ->
 
 
 # ==============================================================================
-# 5. MODULE CHUYỂN PAGE & AUTO ACCEPT 4 BƯỚC (NGUYÊN BẢN SMALI MTOOL MAX)
+# 5. CORE CHUYỂN PAGE SIÊU MẠNH (TRÍCH XUẤT NT_BUNDLE_TREE ĐỘNG 4 BƯỚC)
 # ==============================================================================
 
-class FacebookAdminManager:
-    """Chuyển thể nguyên bản 100% từ Li2/S.smali, Lh2/X0.smali, Lh2/y.smali và LD2/q.smali"""
+def check_step1_response(response_data: Any) -> Tuple[bool, str, Dict[str, Any]]:
+    if isinstance(response_data, str):
+        try:
+            res = json.loads(response_data)
+        except Exception:
+            return False, f"Response không phải JSON: {response_data[:150]}", {}
+    elif isinstance(response_data, dict):
+        res = response_data
+    else:
+        return False, f"Kiểu dữ liệu không hợp lệ: {type(response_data)}", {}
 
-    GRAPHQL_URL = "https://graph.facebook.com/graphql"
-    DOC_ID_ACTION = "30749539927629244093798192451"        # Dùng cho STEP 1, STEP 2, STEP 4
-    DOC_ID_FETCH_INVITE = "221080835214205752894689842827"  # Dùng cho STEP 3 (Lấy invitation_id)
+    errors = res.get("errors")
+    if errors and isinstance(errors, list) and len(errors) > 0:
+        err = errors[0]
+        code = err.get("code")
+        msg = err.get("message", "")
+        summary = err.get("summary", "")
+        desc = err.get("description", "")
+        detail = {"code": code, "message": msg, "summary": summary, "description": desc}
+        if "password" in msg.lower() or "mật khẩu" in desc.lower():
+            return False, f"Mật khẩu không chính xác (code: {code})", detail
+        return False, f"Step 1 thất bại: {desc or summary or msg} (Code: {code})", detail
 
-    BLOKS_VERSION = "338f8ead5977a2c41eba3e92584dcf1d132e8b7928f1f5796662ec064023047d"
-    STYLES_ID = "588d028b36bed0e1889e09b60e0f9aea"
-    USER_AGENT = (
-        "[FBAN/FB4A;FBAV/542.0.0.46.151;FBBV/840338789;"
-        "FBDM/{density=0.75,width=300,height=540};FBLC/vi_VN;FBRV/0;"
-        "FBCR/MobiFone;FBMF/MTool-Max;FBBD/MTool-Max;FBPN/com.facebook.katana;"
-        "FBDV/MTool-Max;FBSV/9;FBOP/1;FBCA/x86_64:arm64-v8a;]"
+    data = res.get("data", {})
+    nt_async = data.get("native_templates_async") if data else None
+    if nt_async is not None:
+        return True, "Step 1 thành công: Đã xác thực mật khẩu", {}
+    return False, "Step 1 thất bại: Không tìm thấy dữ liệu native_templates_async", {"raw": res}
+
+
+def check_step2_response(response_data: Any) -> Tuple[bool, str, Dict[str, Any]]:
+    if isinstance(response_data, str):
+        try:
+            res = json.loads(response_data)
+        except Exception:
+            return False, f"Response không phải JSON: {response_data[:150]}", {}
+    elif isinstance(response_data, dict):
+        res = response_data
+    else:
+        return False, f"Kiểu dữ liệu không hợp lệ: {type(response_data)}", {}
+
+    errors = res.get("errors")
+    if errors and isinstance(errors, list) and len(errors) > 0:
+        err = errors[0]
+        code = err.get("code")
+        msg = err.get("message", "")
+        summary = err.get("summary", "")
+        desc = err.get("description", "")
+        detail = {"code": code, "message": msg, "summary": summary, "description": desc}
+        combined = f"{msg} {summary} {desc}".lower()
+        if "already admin" in combined or "đã là quản trị viên" in combined:
+            return False, "Tài khoản đích đã là quản trị viên của Page", detail
+        if "pending" in combined or "lời mời" in combined:
+            return False, "Đã có lời mời đang chờ duyệt", detail
+        return False, f"Step 2 thất bại: {desc or summary or msg} (Code: {code})", detail
+
+    data = res.get("data", {})
+    nt_async = data.get("native_templates_async") if data else None
+    if nt_async is not None:
+        return True, "Step 2 thành công: Đã gửi lời mời", {}
+    return False, "Step 2 thất bại: Dữ liệu trả về trống", {"raw": res}
+
+
+def check_step3_response(response_data: Any) -> Tuple[bool, str, Dict[str, Any]]:
+    if isinstance(response_data, str):
+        try:
+            res = json.loads(response_data)
+        except Exception:
+            raw_text = response_data
+            m = re.search(r'invitation_id[\\"\':=]+(\d+)', raw_text)
+            if m:
+                inv_id = m.group(1)
+                return True, f"Step 3 thành công: invitation_id = {inv_id}", {"invitation_id": inv_id}
+            return False, f"Response không phải JSON: {response_data[:150]}", {}
+    elif isinstance(response_data, dict):
+        res = response_data
+    else:
+        return False, f"Kiểu dữ liệu không hợp lệ: {type(response_data)}", {}
+
+    errors = res.get("errors")
+    if errors and isinstance(errors, list) and len(errors) > 0:
+        err = errors[0]
+        code = err.get("code")
+        msg = err.get("message", "")
+        return False, f"Step 3 thất bại: {msg} (Code: {code})", {}
+
+    invitation_id = None
+    try:
+        data = res.get("data", {})
+        nt_screen = data.get("native_template_screen", {})
+        nt_bundle = nt_screen.get("nt_bundle", {})
+        attrs = nt_bundle.get("nt_bundle_attributes", [])
+        for attr in attrs:
+            if attr.get("name") == "1":
+                params_str = attr.get("intent_value", {}).get("query", {}).get("params", "")
+                if "invitation_id" in params_str:
+                    m = re.search(r"invitation_id[=:]\s*(\d+)", params_str)
+                    if m:
+                        invitation_id = m.group(1)
+                        break
+    except Exception:
+        pass
+
+    if not invitation_id:
+        json_dump = json.dumps(res)
+        m = re.search(r'invitation_id[\\"\':=]+(\d+)', json_dump)
+        if m:
+            invitation_id = m.group(1)
+
+    if invitation_id:
+        return True, f"Step 3 thành công: invitation_id = {invitation_id}", {"invitation_id": invitation_id}
+    return False, "Step 3 không tìm thấy lời mời (có thể chưa nhận được hoặc đã hết hạn)", {"raw": res}
+
+
+def check_step4_response(response_data: Any) -> Tuple[bool, str, Dict[str, Any]]:
+    if isinstance(response_data, str):
+        try:
+            res = json.loads(response_data)
+        except Exception:
+            return False, f"Response không phải JSON: {response_data[:150]}", {}
+    elif isinstance(response_data, dict):
+        res = response_data
+    else:
+        return False, f"Kiểu dữ liệu không hợp lệ: {type(response_data)}", {}
+
+    errors = res.get("errors")
+    if errors and isinstance(errors, list) and len(errors) > 0:
+        err = errors[0]
+        code = err.get("code")
+        msg = err.get("message", "")
+        summary = err.get("summary", "")
+        desc = err.get("description", "")
+        combined = f"{msg} {summary} {desc}".lower()
+        if "accepted" in combined or "đã chấp nhận" in combined:
+            return True, "Lời mời này đã được chấp nhận từ trước", {}
+        if "expired" in combined or "hết hạn" in combined:
+            return False, "Lời mời đã hết hạn hoặc bị hủy", {}
+        return False, f"Step 4 thất bại: {desc or msg} (Code: {code})", {}
+
+    data = res.get("data", {})
+    nt_async = data.get("native_templates_async") if data else None
+    if nt_async is not None:
+        return True, "🎉 Chuyển Page thành công! Tài khoản đích đã là Admin", {}
+    return False, "Step 4 thất bại: Không nhận được xác nhận", {"raw": res}
+
+
+def extract_payload_from_tree(nt_bundle_tree: str) -> Optional[str]:
+    """Bóc tách URL permissions/update động từ nt_bundle_tree của Step 1."""
+    if not nt_bundle_tree:
+        return None
+    m = re.search(r'(/nt/profile/admin_management/permissions/update\?[^"\'\\}]+)', nt_bundle_tree)
+    if m:
+        return m.group(1).replace(r"\/", "/")
+    try:
+        tree = json.loads(nt_bundle_tree)
+
+        def find_update_url(obj):
+            if isinstance(obj, dict):
+                if "$" in obj and isinstance(obj["$"], str) and "/nt/profile/admin_management/permissions/update" in obj["$"]:
+                    return obj["$"].replace(r"\/", "/")
+                for v in obj.values():
+                    res = find_update_url(v)
+                    if res:
+                        return res
+            elif isinstance(obj, list):
+                for item in obj:
+                    res = find_update_url(item)
+                    if res:
+                        return res
+            return None
+
+        return find_update_url(tree)
+    except Exception:
+        return None
+
+
+def xac_nhan_mk(
+    auth_token: str,
+    admin_id: str,
+    profile_id: str,
+    password: str,
+    proxy: Optional[str] = None
+) -> Tuple[Optional[str], str]:
+    """Bước 1: Xác thực mật khẩu và trả về (nt_bundle_tree, thông_báo)."""
+    url = "https://graph.facebook.com/graphql"
+    clean_token = auth_token.replace("OAuth ", "").replace("Bearer ", "").strip()
+    headers = {
+        "Accept-Encoding": "gzip",
+        "authorization": f"OAuth {clean_token}",
+        "Connection": "Keep-Alive",
+        "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+        "user-agent": "[FBAN/FB4A;FBAV/542.0.0.46.151;FBBV/840338789;FBDM/{density=0.75,width=300,height=540};FBLC/vi_VN;FBRV/0;FBCR/MobiFone;FBMF/MTool-Max;FBBD/MTool-Max;FBPN/com.facebook.katana;FBDV/MTool-Max;FBSV/9;FBOP/1;FBCA/x86_64:arm64-v8a;]",
+        "x-fb-connection-type": "WIFI",
+        "x-fb-device-group": "4789",
+        "x-fb-friendly-name": "NativeTemplateAsyncQuery",
+        "x-fb-request-analytics-tags": '{"network_tags":{"product":"350685531728","request_category":"graphql","purpose":"none","retry_attempt":"0"},"application_tags":"graphservice"}',
+        "x-graphql-client-library": "graphservice"
+    }
+    nt_context = {
+        "using_white_navbar": True,
+        "styles_id": "588d028b36bed0e1889e09b60e0f9aea",
+        "pixel_ratio": 2,
+        "is_push_on": True,
+        "debug_tooling_metadata_token": None,
+        "is_flipper_enabled": False,
+        "theme_params": [{"value": [], "design_system_name": "FDS"}],
+        "bloks_version": "338f8ead5977a2c41eba3e92584dcf1d132e8b7928f1f5796662ec064023047d"
+    }
+    payload_string = (
+        f"/nt/profile/admin_management/permissions_reauth?"
+        f"admin_id={admin_id}&"
+        f"admin_rows_container_id=%5B%228bxxoh%3A2%22%2Cnull%5D&"
+        f"admin_type=full_access&"
+        f"entry_point_screen_id=%5B%227o2xil%3A5%22%2Cnull%5D&"
+        f"profile_id={profile_id}&"
+        f"state_ids%5Bauthenticated%5D=8csr9g%3A0&"
+        f"state_ids%5Bauthentication_attempted%5D=8csr9g%3A1&"
+        f"state_ids%5Bshow_entry_point_saving_spinner%5D=8bxxoh%3A0&"
+        f"state_ids%5Bshow_saving_spinner%5D=8csr9g%3A3&"
+        f"state_ids%5Bads%5D=8clnk7%3A2&"
+        f"state_ids%5Bcontent%5D=8clnk7%3A3&"
+        f"state_ids%5Binsights%5D=8clnk7%3A4&"
+        f"state_ids%5Bmessages%5D=8clnk7%3A5&"
+        f"state_ids%5Bmoderate%5D=8clnk7%3A6"
     )
+    client_data = {"sensitive_string_value": json.dumps([["password", password]])}
+    variables = {
+        "params": {
+            "nt_context": nt_context,
+            "payload": payload_string,
+            "client_data": client_data
+        },
+        "nt_context": nt_context,
+        "scale": "2",
+        "use_native_entrypoint_for_stars_on_reels": True,
+        "profile_image_size": 188,
+        "include_image_ranges": True
+    }
+    data = {
+        "fb_api_client_context": '{"is_background":false}',
+        "pretty": "false",
+        "variables": json.dumps(variables, ensure_ascii=False),
+        "method": "post",
+        "client_doc_id": "30749539927629244093798192451",
+        "format": "json",
+        "server_timestamps": "true",
+        "locale": "vi_VN",
+        "fb_api_req_friendly_name": "NativeTemplateAsyncQuery",
+        "fb_api_caller_class": "graphservice"
+    }
+    try:
+        resp = requests.post(url, headers=headers, data=data, proxies=parse_proxy(proxy), timeout=30, verify=False)
+        resp_json = resp.json()
+    except Exception as e:
+        err_str = f"Lỗi request Step 1: {e}"
+        logger.error(err_str)
+        return None, err_str
 
-    def __init__(self, sender_proxy: Optional[str] = None, receiver_proxy: Optional[str] = None):
-        self.sender_proxies = parse_proxy(sender_proxy)
-        self.receiver_proxies = parse_proxy(receiver_proxy) or self.sender_proxies
+    is_ok, msg, _ = check_step1_response(resp_json)
+    if not is_ok:
+        logger.error(msg)
+        return None, msg
+    logger.debug(msg)
+    try:
+        tree = resp_json["data"]["native_templates_async"]["native_template_bundles"][0]["nt_bundle_tree"]
+        return tree, msg
+    except (KeyError, IndexError, TypeError):
+        err_str = "Không tìm thấy nt_bundle_tree trong response Step 1."
+        logger.error(err_str)
+        return None, err_str
 
-    @classmethod
-    def build_headers(cls, access_token: str) -> dict:
-        analytics_tags = {
-            "network_tags": {
-                "product": "350685531728",
-                "request_category": "graphql",
-                "purpose": "none",
-                "retry_attempt": "0",
-            },
-            "application_tags": "graphservice",
-        }
-        return {
-            "user-agent": cls.USER_AGENT,
-            "content-type": "application/x-www-form-urlencoded",
-            "x-fb-request-analytics-tags": json.dumps(analytics_tags, separators=(",", ":")),
-            "x-fb-friendly-name": "NativeTemplateAsyncQuery",
-            "x-graphql-client-library": "graphservice",
-            "x-fb-connection-type": "WIFI",
-            "authorization": f"OAuth {access_token}",
-            "x-fb-device-group": "4789",
-        }
 
-    @classmethod
-    def build_nt_context(cls) -> dict:
-        return {
+def gui_loi_moi(auth_token: str, nt_bundle_tree: str, proxy: Optional[str] = None) -> Tuple[bool, str]:
+    """Bước 2: Bóc tách URL permissions/update từ nt_bundle_tree và gửi lời mời Admin."""
+    payload = extract_payload_from_tree(nt_bundle_tree)
+    if not payload:
+        err_str = "Không tìm thấy URL permissions/update trong nt_bundle_tree (Kiểm tra lại mật khẩu/quyền Page)"
+        logger.error(err_str)
+        return False, err_str
+
+    clean_token = auth_token.replace("OAuth ", "").replace("Bearer ", "").strip()
+    state_data = {
+        "ads": True,
+        "insights": True,
+        "messages": True,
+        "content": True,
+        "moderate": True,
+        "show_entry_point_saving_spinner": "NONE"
+    }
+    nt_context = {
+        "using_white_navbar": True,
+        "styles_id": "588d028b36bed0e1889e09b60e0f9aea",
+        "pixel_ratio": 2,
+        "is_push_on": True,
+        "debug_tooling_metadata_token": None,
+        "is_flipper_enabled": False,
+        "theme_params": [{"value": [], "design_system_name": "FDS"}],
+        "bloks_version": "338f8ead5977a2c41eba3e92584dcf1d132e8b7928f1f5796662ec064023047d"
+    }
+    variables = {
+        "params": {
+            "payload": payload,
+            "state_data": json.dumps(state_data),
+            "nt_context": nt_context
+        },
+        "nt_context": nt_context,
+        "scale": "2",
+        "use_native_entrypoint_for_stars_on_reels": True,
+        "profile_image_size": 188,
+        "include_image_ranges": True
+    }
+    data = {
+        "fb_api_client_context": '{"is_background":false}',
+        "pretty": "false",
+        "variables": json.dumps(variables, ensure_ascii=False),
+        "method": "post",
+        "client_doc_id": "30749539927629244093798192451",
+        "format": "json",
+        "server_timestamps": "true",
+        "locale": "vi_VN",
+        "fb_api_req_friendly_name": "NativeTemplateAsyncQuery",
+        "fb_api_analytics_tags": '["GraphServices"]',
+        "client_trace_id": str(uuid.uuid4()),
+        "fb_api_caller_class": "graphservice"
+    }
+    headers = {
+        "Accept-Encoding": "gzip",
+        "authorization": f"OAuth {clean_token}",
+        "Connection": "Keep-Alive",
+        "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+        "Host": "graph.facebook.com",
+        "user-agent": "[FBAN/FB4A;FBAV/542.0.0.46.151;FBBV/840338789;FBDM/{density=0.75,width=300,height=540};FBLC/vi_VN;FBRV/0;FBCR/MobiFone;FBMF/MTool-Max;FBBD/MTool-Max;FBPN/com.facebook.katana;FBDV/MTool-Max;FBSV/9;FBOP/1;FBCA/x86_64:arm64-v8a;]",
+        "x-fb-connection-type": "WIFI",
+        "x-fb-device-group": "4789",
+        "x-fb-friendly-name": "NativeTemplateAsyncQuery",
+        "x-fb-request-analytics-tags": '{"network_tags":{"product":"350685531728","request_category":"graphql","purpose":"none","retry_attempt":"0"},"application_tags":"graphservice"}',
+        "x-graphql-client-library": "graphservice"
+    }
+    url = "https://graph.facebook.com/graphql"
+    try:
+        resp = requests.post(url, headers=headers, data=data, proxies=parse_proxy(proxy), timeout=30, verify=False)
+        resp_json = resp.json()
+    except Exception as e:
+        err_str = f"Lỗi request Step 2: {e}"
+        logger.error(err_str)
+        return False, err_str
+    is_ok, msg, _ = check_step2_response(resp_json)
+    if not is_ok:
+        logger.error(msg)
+        return False, msg
+    logger.debug(msg)
+    return True, msg
+
+
+def ktra_loi_moi(
+    auth_token: str,
+    profile_id: str,
+    invitee_id: str,
+    proxy: Optional[str] = None
+) -> Tuple[Optional[str], str]:
+    """Bước 3: Lấy mã invitation_id từ tài khoản nhận (Nick Mẹ)."""
+    url = "https://graph.facebook.com/graphql"
+    clean_token = auth_token.replace("OAuth ", "").replace("Bearer ", "").strip()
+    headers = {
+        "Accept-Encoding": "gzip",
+        "authorization": f"OAuth {clean_token}",
+        "Connection": "Keep-Alive",
+        "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+        "Host": "graph.facebook.com",
+        "user-agent": "[FBAN/FB4A;FBAV/542.0.0.46.151;FBBV/840338789;FBDM/{density=0.75,width=300,height=540};FBLC/vi_VN;FBRV/0;FBCR/MobiFone;FBMF/MTool-Max;FBBD/MTool-Max;FBPN/com.facebook.katana;FBDV/MTool-Max;FBSV/9;FBOP/1;FBCA/x86_64:arm64-v8a;]",
+        "x-fb-connection-type": "WIFI",
+        "x-fb-device-group": "4789",
+        "x-fb-friendly-name": "NativeTemplateAsyncQuery",
+        "x-fb-request-analytics-tags": '{"network_tags":{"product":"350685531728","request_category":"graphql","purpose":"none","retry_attempt":"0"},"application_tags":"graphservice"}',
+        "x-graphql-client-library": "graphservice"
+    }
+    nt_context = {
+        "using_white_navbar": True,
+        "styles_id": "588d028b36bed0e1889e09b60e0f9aea",
+        "pixel_ratio": 2,
+        "is_push_on": True,
+        "debug_tooling_metadata_token": None,
+        "is_flipper_enabled": False,
+        "theme_params": [{"value": [], "design_system_name": "FDS"}],
+        "bloks_version": "338f8ead5977a2c41eba3e92584dcf1d132e8b7928f1f5796662ec064023047d"
+    }
+    params_str = json.dumps({
+        "screen_id": '["sz9fnp:17",null]',
+        "profile_id": str(profile_id),
+        "invitee_id": str(invitee_id)
+    })
+    variables = {
+        "params": {
+            "nt_context": nt_context,
+            "path": "/nt/profile/admin_management/invitation",
+            "params": params_str,
+            "extra_client_data": {}
+        },
+        "scale": "2",
+        "use_native_entrypoint_for_stars_on_reels": True,
+        "nt_context": nt_context
+    }
+    data = {
+        "pretty": "false",
+        "variables": json.dumps(variables, ensure_ascii=False),
+        "method": "post",
+        "client_doc_id": "221080835214205752894689842827",
+        "purpose": "fetch",
+        "format": "json",
+        "server_timestamps": "true",
+        "locale": "vi_VN",
+        "fb_api_req_friendly_name": "NativeTemplateScreenQuery",
+        "client_trace_id": str(uuid.uuid4()),
+        "fb_api_client_context": '{"is_background":false}',
+        "fb_api_analytics_tags": '["surfaces.fb.GraphServiceEmitter","GraphServices"]',
+        "fb_api_caller_class": "graphservice"
+    }
+    try:
+        resp = requests.post(url, headers=headers, data=data, proxies=parse_proxy(proxy), timeout=30, verify=False)
+        resp_json = resp.json()
+    except Exception as e:
+        err_str = f"Lỗi request Step 3: {e}"
+        logger.error(err_str)
+        return None, err_str
+    is_ok, msg, detail = check_step3_response(resp_json)
+    if not is_ok:
+        logger.error(msg)
+        return None, msg
+    logger.debug(msg)
+    return detail.get("invitation_id"), msg
+
+
+def xac_nhan_loi_moi(
+    auth_token: str,
+    invitation_id: str,
+    accept_invitation: int = 1,
+    proxy: Optional[str] = None
+) -> Tuple[bool, str]:
+    """Bước 4: Chấp nhận lời mời Admin bằng Token tài khoản nhận (Nick Mẹ)."""
+    url = "https://graph.facebook.com/graphql"
+    clean_token = auth_token.replace("OAuth ", "").replace("Bearer ", "").strip()
+    headers = {
+        "Accept-Encoding": "gzip",
+        "authorization": f"OAuth {clean_token}",
+        "Connection": "Keep-Alive",
+        "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+        "Host": "graph.facebook.com",
+        "user-agent": "[FBAN/FB4A;FBAV/542.0.0.46.151;FBBV/840338789;FBDM/{density=0.75,width=300,height=540};FBLC/vi_VN;FBRV/0;FBCR/MobiFone;FBMF/MTool-Max;FBBD/MTool-Max;FBPN/com.facebook.katana;FBDV/MTool-Max;FBSV/9;FBOP/1;FBCA/x86_64:arm64-v8a;]",
+        "x-fb-connection-type": "WIFI",
+        "x-fb-device-group": "4789",
+        "x-fb-friendly-name": "NativeTemplateAsyncQuery",
+        "x-fb-request-analytics-tags": '{"network_tags":{"product":"350685531728","request_category":"graphql","purpose":"none","retry_attempt":"0"},"application_tags":"graphservice"}',
+        "x-graphql-client-library": "graphservice"
+    }
+    nt_context = {
+        "using_white_navbar": True,
+        "styles_id": "588d028b36bed0e1889e09b60e0f9aea",
+        "pixel_ratio": 2,
+        "is_push_on": True,
+        "debug_tooling_metadata_token": None,
+        "is_flipper_enabled": False,
+        "theme_params": [{"value": [], "design_system_name": "FDS"}],
+        "bloks_version": "338f8ead5977a2c41eba3e92584dcf1d132e8b7928f1f5796662ec064023047d"
+    }
+    payload = f"/nt/profile/admin_management/invitation_response?accept_invitation={accept_invitation}&invitation_id={invitation_id}&admin_type=full_access"
+    variables = {
+        "params": {
+            "payload": payload,
+            "nt_context": nt_context
+        },
+        "nt_context": nt_context,
+        "scale": "2",
+        "use_native_entrypoint_for_stars_on_reels": True,
+        "profile_image_size": 188,
+        "include_image_ranges": True
+    }
+    data = {
+        "fb_api_client_context": '{"is_background":false}',
+        "pretty": "false",
+        "variables": json.dumps(variables, ensure_ascii=False),
+        "method": "post",
+        "client_doc_id": "30749539927629244093798192451",
+        "format": "json",
+        "server_timestamps": "true",
+        "locale": "vi_VN",
+        "fb_api_req_friendly_name": "NativeTemplateAsyncQuery",
+        "fb_api_analytics_tags": '["GraphServices"]',
+        "client_trace_id": str(uuid.uuid4()),
+        "fb_api_caller_class": "graphservice"
+    }
+    try:
+        resp = requests.post(url, headers=headers, data=data, proxies=parse_proxy(proxy), timeout=30, verify=False)
+        resp_json = resp.json()
+    except Exception as e:
+        err_str = f"Lỗi request Step 4: {e}"
+        logger.error(err_str)
+        return False, err_str
+    is_ok, msg, _ = check_step4_response(resp_json)
+    if not is_ok:
+        logger.error(msg)
+        return False, msg
+    logger.debug(msg)
+    return True, msg
+
+
+def get_id(token: str, proxy: Optional[str] = None) -> Optional[Tuple[str, str]]:
+    url = "https://graph.facebook.com/v24.0/me"
+    headers = {
+        "Accept-Encoding": "gzip",
+        "Connection": "Keep-Alive",
+        "Host": "graph.facebook.com",
+        "User-Agent": "okhttp/5.1.0",
+    }
+    params = {"fields": "id,name", "access_token": token}
+    try:
+        resp = requests.get(url, headers=headers, params=params, proxies=parse_proxy(proxy), timeout=25, verify=False)
+        data = resp.json()
+    except Exception as e:
+        logger.error(f"Lỗi request lấy thông tin tài khoản: {e}")
+        return None
+    if not isinstance(data, dict) or "error" in data:
+        return None
+    uid = data.get("id")
+    uname = data.get("name")
+    if not uid:
+        return None
+    return str(uid), uname or ""
+
+
+def get_managed_page_ids(token: str, proxy: Optional[str] = None) -> Set[str]:
+    page_ids = set()
+    url = "https://graph.facebook.com/v24.0/me/accounts"
+    headers = {
+        "Accept-Encoding": "gzip",
+        "Connection": "Keep-Alive",
+        "Host": "graph.facebook.com",
+        "User-Agent": "okhttp/5.1.0",
+    }
+    params = {"fields": "id,additional_profile_id", "access_token": token, "limit": 100}
+    proxies = parse_proxy(proxy)
+    try:
+        resp = requests.get(url, headers=headers, params=params, proxies=proxies, timeout=25, verify=False)
+        data = resp.json()
+        if not isinstance(data, dict) or "error" in data:
+            return page_ids
+        for page in data.get("data", []):
+            if page.get("id"):
+                page_ids.add(str(page["id"]))
+            if page.get("additional_profile_id"):
+                page_ids.add(str(page["additional_profile_id"]))
+        next_page = data.get("paging", {}).get("next")
+        while next_page:
+            resp = requests.get(next_page, proxies=proxies, timeout=25, verify=False)
+            data = resp.json()
+            for page in data.get("data", []):
+                if page.get("id"):
+                    page_ids.add(str(page["id"]))
+                if page.get("additional_profile_id"):
+                    page_ids.add(str(page["additional_profile_id"]))
+            next_page = data.get("paging", {}).get("next")
+    except Exception as e:
+        logger.error(f"Lỗi khi lấy danh sách page từ token đích: {e}")
+    return page_ids
+
+
+def _fetch_all_pages_raw(token: str, profile_id: str, proxy: Optional[str] = None) -> List[Dict[str, str]]:
+    """
+    Lấy danh sách Page kết hợp /v24.0/me/accounts và ProfileSwitcherQuery (client_doc_id 116912609015732060545213902280).
+    Đảm bảo trả về đúng page_uid (additional_profile_id) và access_token (sw_token) chuẩn cho Step 1 & Step 2.
+    """
+    proxies = parse_proxy(proxy)
+    headers_graph = {
+        "Accept-Encoding": "gzip",
+        "Connection": "Keep-Alive",
+        "Host": "graph.facebook.com",
+        "User-Agent": "okhttp/5.1.0",
+    }
+    params_graph = {
+        "fields": "id,name,access_token,additional_profile_id",
+        "access_token": token,
+        "limit": 100
+    }
+    pages_dict = {}
+    try:
+        resp = requests.get(
+            "https://graph.facebook.com/v24.0/me/accounts",
+            params=params_graph, headers=headers_graph, proxies=proxies, timeout=25, verify=False
+        )
+        data = resp.json()
+        if isinstance(data, dict):
+            for p in data.get("data", []):
+                pid = str(p.get("id", ""))
+                if pid:
+                    pages_dict[pid] = {
+                        "page_id": pid,
+                        "name": p.get("name", ""),
+                        "additional_profile_id": str(p.get("additional_profile_id", "") or pid),
+                        "access_token": p.get("access_token", "")
+                    }
+    except Exception as e:
+        logger.error(f"Lỗi lấy danh sách page qua Graph API: {e}")
+
+    url = "https://b-graph.facebook.com/graphql"
+    headers_sw = {
+        "Accept-Encoding": "gzip",
+        "Authorization": f"OAuth {token}",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": (
+            "[FBAN/FB4A;FBAV/542.0.0.46.151;FBBV/840338789;"
+            "FBDM/{density=0.75,width=300,height=540};"
+            "FBLC/vi_VN;FBRV/0;FBCR/MobiFone;"
+            "FBMF/MTool-Max;FBBD/MTool-Max;"
+            "FBPN/com.facebook.katana;FBDV/MTool-Max;"
+            "FBSV/9;FBOP/1;FBCA/x86_64:arm64-v8a;]"
+        ),
+    }
+    variables = {
+        "profile_switcher_connection_first": 300,
+        "additional_profile_picture_size": 80,
+        "profileID": str(profile_id),
+        "main_profile_picture_size": 80,
+        "scale": "2",
+        "nt_context": {
             "using_white_navbar": True,
-            "styles_id": cls.STYLES_ID,
+            "styles_id": "588d028b36bed0e1889e09b60e0f9aea",
             "pixel_ratio": 2,
             "is_push_on": True,
             "debug_tooling_metadata_token": None,
             "is_flipper_enabled": False,
             "theme_params": [{"value": [], "design_system_name": "FDS"}],
-            "bloks_version": cls.BLOKS_VERSION,
-        }
+            "bloks_version": "338f8ead5977a2c41eba3e92584dcf1d132e8b7928f1f5796662ec064023047d"
+        },
+        "overflow_recent_searches_filter_ids": [],
+        "use_native_entrypoint_for_stars_on_reels": True
+    }
+    data_sw = {
+        "method": "post",
+        "pretty": "false",
+        "format": "json",
+        "server_timestamps": "true",
+        "locale": "vi_VN",
+        "client_doc_id": "116912609015732060545213902280",
+        "variables": json.dumps(variables, separators=(",", ":"))
+    }
+    try:
+        resp = requests.post(url, headers=headers_sw, data=data_sw, proxies=proxies, timeout=25, verify=False)
+        result = resp.json()
+        if isinstance(result, dict):
+            user = result.get("data", {}).get("user", {})
+            profiles = user.get("profile_switcher_eligible_profiles", {}).get("edges", [])
+            for edge in profiles:
+                node = edge.get("node", {})
+                prof = node.get("profile", {})
+                sinfo = node.get("session_info", {})
+                prof_id = str(prof.get("id", ""))
+                prof_name = prof.get("name", "")
+                sw_token = sinfo.get("access_token", "")
 
-    @staticmethod
-    def build_permissions() -> dict:
-        return {
-            "ads": True,
-            "insights": True,
-            "messages": True,
-            "content": True,
-            "moderate": True,
-            "show_entry_point_saving_spinner": "NONE",
-        }
+                if not prof_id or prof_id == str(profile_id):
+                    continue
 
-    @classmethod
-    def build_variables(cls, params_obj: dict, nt_context: Optional[dict] = None) -> dict:
-        if nt_context is None:
-            nt_context = cls.build_nt_context()
-        return {
-            "params": params_obj,
-            "nt_context": nt_context,
-            "scale": "2",
-            "use_native_entrypoint_for_stars_on_reels": True,
-            "profile_image_size": 188,
-            "include_image_ranges": True,
-        }
+                matched = False
+                for pid, item in pages_dict.items():
+                    if item["additional_profile_id"] == prof_id or item["page_id"] == prof_id or item["name"].strip().lower() == prof_name.strip().lower():
+                        if sw_token:
+                            item["access_token"] = sw_token
+                        item["additional_profile_id"] = prof_id
+                        matched = True
+                        break
+                if not matched:
+                    pages_dict[prof_id] = {
+                        "page_id": prof_id,
+                        "name": prof_name,
+                        "additional_profile_id": prof_id,
+                        "access_token": sw_token
+                    }
+    except Exception as e:
+        logger.error(f"Lỗi gọi ProfileSwitcherQuery: {e}")
 
-    @staticmethod
-    def build_form_data(client_doc_id: str, variables_obj: dict) -> dict:
-        return {
-            "method": "post",
-            "pretty": "false",
-            "format": "json",
-            "server_timestamps": "true",
-            "locale": "vi_VN",
-            "fb_api_req_friendly_name": "NativeTemplateAsyncQuery",
-            "fb_api_caller_class": "graphservice",
-            "client_doc_id": client_doc_id,
-            "fb_api_client_context": json.dumps({"is_background": False}, separators=(",", ":")),
-            "variables": json.dumps(variables_obj, separators=(",", ":")),
-        }
+    return list(pages_dict.values())
 
-    @staticmethod
-    def extract_invitation_id(resp_json: dict) -> Optional[str]:
-        try:
-            attrs = resp_json["data"]["native_template_screen"]["nt_bundle"]["nt_bundle_attributes"]
-            for attr in attrs:
-                if str(attr.get("name")) == "1":
-                    params_str = attr["intent_value"]["query"]["params"]
-                    if "invitation_id" in params_str:
-                        parts = params_str.split("invitation_id")
-                        if len(parts) > 1:
-                            cleaned = re.sub(r"[^0-9]", " ", parts[1]).strip()
-                            tokens = re.split(r"\s+", cleaned)
-                            if tokens and tokens[0]:
-                                return tokens[0]
-        except Exception:
-            pass
-        try:
-            raw_str = json.dumps(resp_json)
-            m = re.search(r"invitation_id[^\d]+(\d{8,25})", raw_str)
-            if m:
-                return m.group(1)
-        except Exception:
-            pass
-        return None
 
-    def post_graphql(self, step_name: str, form_data: dict, token: str, is_receiver: bool) -> dict:
-        headers = self.build_headers(token)
-        proxies = self.receiver_proxies if is_receiver else self.sender_proxies
+def execute_super_transfer(
+    page_uid: str,
+    page_id: str,
+    page_token: str,
+    sender_token: str,
+    password: str,
+    target_uid: str,
+    receiver_token: Optional[str] = None,
+    sender_proxy: Optional[str] = None,
+    receiver_proxy: Optional[str] = None,
+    step_callback=None
+) -> Dict[str, Any]:
+    """
+    Hàm điều phối Chuyển Page Siêu Mạnh 4 Bước:
+    1. xac_nhan_mk (Step 1) -> lấy nt_bundle_tree
+    2. gui_loi_moi (Step 2) -> bóc URL permissions/update từ nt_bundle_tree & gửi lời mời
+    3. ktra_loi_moi (Step 3) -> lấy invitation_id (nếu có receiver_token)
+    4. xac_nhan_loi_moi (Step 4) -> Auto Accept (nếu có receiver_token)
+    """
+    res_out = {
+        "success": False,
+        "status": "FAILED",
+        "invitation_id": None,
+        "message": ""
+    }
 
-        encoded_parts = [f"{k}={urllib.parse.quote_plus(str(v))}" for k, v in form_data.items()]
-        body_str = "&".join(encoded_parts)
+    if not password:
+        res_out["message"] = "Thiếu mật khẩu tài khoản nguồn cho Bước 1 (xac_nhan_mk)"
+        return res_out
 
-        s = requests.Session()
-        s.verify = False
-        s.trust_env = False
-        if proxies:
-            s.proxies.update(proxies)
+    # Ưu tiên dùng page_token + page_uid (additional_profile_id) đúng chuẩn code mới
+    candidate_tokens = [tk for tk in [page_token, sender_token] if tk]
+    candidate_pids = []
+    for pid in [page_uid, page_id]:
+        if pid and str(pid) not in candidate_pids:
+            candidate_pids.append(str(pid))
 
-        resp = s.post(self.GRAPHQL_URL, headers=headers, data=body_str, timeout=25)
-        if not resp.ok:
-            raise RuntimeError(f"[{step_name}] HTTP {resp.status_code}: {resp.text[:120]}")
+    nt_tree = None
+    active_token = page_token or sender_token
+    active_pid = page_uid or page_id
+    last_msg = ""
 
-        data = resp.json()
-        data["_http_status"] = resp.status_code
-        return data
-
-    def execute_step1(self, page_id: str, target_uid: str, password: str, sender_token: str) -> dict:
-        payload_path = (
-            "/nt/profile/admin_management/permissions_reauth?admin_id="
-            f"{target_uid}"
-            "&admin_rows_container_id=%5B%228bxxoh%3A2%22%2Cnull%5D"
-            "&admin_type=full_access"
-            "&entry_point_screen_id=%5B%227o2xil%3A5%22%2Cnull%5D"
-            f"&profile_id={page_id}"
-            "&state_ids%5Bauthenticated%5D=8csr9g%3A0"
-            "&state_ids%5Bauthentication_attempted%5D=8csr9g%3A1"
-            "&state_ids%5Bshow_entry_point_saving_spinner%5D=8bxxoh%3A0"
-            "&state_ids%5Bshow_saving_spinner%5D=8csr9g%3A3"
-            "&state_ids%5Bads%5D=8clnk7%3A2"
-            "&state_ids%5Bcontent%5D=8clnk7%3A3"
-            "&state_ids%5Binsights%5D=8clnk7%3A4"
-            "&state_ids%5Bmessages%5D=8clnk7%3A5"
-            "&state_ids%5Bmoderate%5D=8clnk7%3A6"
-        )
-        nt_context = self.build_nt_context()
-        sensitive_array = [["password", password]]
-        client_data = {"sensitive_string_value": json.dumps(sensitive_array, separators=(",", ":"))}
-        params_obj = {"nt_context": nt_context, "payload": payload_path, "client_data": client_data}
-        variables = self.build_variables(params_obj, nt_context)
-        form_data = self.build_form_data(self.DOC_ID_ACTION, variables)
-        return self.post_graphql("STEP1", form_data, sender_token, is_receiver=False)
-
-    def execute_step2(self, page_id: str, target_uid: str, sender_token: str) -> dict:
-        payload_path = (
-            "/nt/profile/admin_management/permissions/update?"
-            "admin_rows_container_id=%5B%228bxxoh%3A2%22%2Cnull%5D"
-            "&entry_point_screen_id=%5B%227o2xil%3A5%22%2Cnull%5D"
-            f"&admin_type=full_access&profile_id={page_id}"
-            f"&target_admin_id={target_uid}"
-            "&secured_sensitive_actions%5B0%5D=page_admin_access_addition"
-            "&state_ids%5Bshow_entry_point_saving_spinner%5D=8bxxoh%3A0"
-            "&state_ids%5Bads%5D=8clnk7%3A2"
-            "&state_ids%5Bcontent%5D=8clnk7%3A3"
-            "&state_ids%5Binsights%5D=8clnk7%3A4"
-            "&state_ids%5Bmessages%5D=8clnk7%3A5"
-            "&state_ids%5Bmoderate%5D=8clnk7%3A6"
-        )
-        nt_context = self.build_nt_context()
-        permissions = self.build_permissions()
-        params_obj = {
-            "payload": payload_path,
-            "state_data": json.dumps(permissions, separators=(",", ":")),
-            "nt_context": nt_context,
-        }
-        variables = self.build_variables(params_obj, nt_context)
-        form_data = self.build_form_data(self.DOC_ID_ACTION, variables)
-        form_data["fb_api_analytics_tags"] = '["GraphServices"]'
-        form_data["client_trace_id"] = str(uuid.uuid4())
-        return self.post_graphql("STEP2", form_data, sender_token, is_receiver=False)
-
-    def execute_step3(self, page_id: str, target_uid: str, receiver_token: str) -> dict:
-        nt_context = self.build_nt_context()
-        inner_params = {
-            "screen_id": '["sz9fnp:17",null]',
-            "profile_id": str(page_id),
-            "invitee_id": str(target_uid),
-        }
-        outer_params = {
-            "nt_context": nt_context,
-            "path": "/nt/profile/admin_management/invitation",
-            "params": json.dumps(inner_params, separators=(",", ":")),
-            "extra_client_data": {},
-        }
-        variables = {
-            "params": outer_params,
-            "scale": "2",
-            "use_native_entrypoint_for_stars_on_reels": True,
-            "nt_context": nt_context,
-        }
-        form_data = self.build_form_data(self.DOC_ID_FETCH_INVITE, variables)
-        form_data["purpose"] = "fetch"
-        form_data["fb_api_req_friendly_name"] = "NativeTemplateScreenQuery"
-        form_data["fb_api_analytics_tags"] = '["surfaces.fb.GraphServiceEmitter","GraphServices"]'
-        form_data["client_trace_id"] = str(uuid.uuid4())
-        return self.post_graphql("STEP3", form_data, receiver_token, is_receiver=True)
-
-    def execute_step4(self, invitation_id: str, receiver_token: str) -> dict:
-        payload_path = (
-            "/nt/profile/admin_management/invitation_response?"
-            f"accept_invitation=1&invitation_id={invitation_id}&admin_type=full_access"
-        )
-        nt_context = self.build_nt_context()
-        params_obj = {"payload": payload_path, "nt_context": nt_context}
-        variables = self.build_variables(params_obj, nt_context)
-        form_data = self.build_form_data(self.DOC_ID_ACTION, variables)
-        form_data["fb_api_analytics_tags"] = '["GraphServices"]'
-        form_data["client_trace_id"] = str(uuid.uuid4())
-        return self.post_graphql("STEP4", form_data, receiver_token, is_receiver=True)
-
-    def transfer_page(
-        self,
-        page_id: str,
-        sender_token: str,
-        password: str,
-        target_uid: str,
-        receiver_token: Optional[str] = None,
-        auto_accept: bool = False,
-        additional_profile_id: str = "",
-        page_token: str = "",
-        step_callback=None
-    ) -> dict:
-        result = {
-            "success": False,
-            "page_id": page_id,
-            "target_uid": target_uid,
-            "invitation_id": None,
-            "status": "FAILED",
-            "message": "",
-        }
-
-        candidate_profile_ids = []
-        for pid in [additional_profile_id, page_id]:
-            if pid and str(pid) not in candidate_profile_ids:
-                candidate_profile_ids.append(str(pid))
-
-        candidate_tokens = []
-        for tk in [sender_token, page_token]:
-            if tk and str(tk) not in candidate_tokens:
-                candidate_tokens.append(str(tk))
-
-        step12_ok = False
-        last_err = ""
-
-        for pid in candidate_profile_ids:
-            if step12_ok:
-                break
-            for s_tk in candidate_tokens:
-                try:
-                    if step_callback:
-                        step_callback(f"MTool Step 1: Đang xác thực mật khẩu cho Page {pid}...")
-                    resp1 = self.execute_step1(pid, target_uid, password, s_tk)
-                    if "errors" in resp1:
-                        last_err = f"Step 1 lỗi: {resp1['errors'][0].get('message', resp1['errors'])}"
-                        continue
-
-                    if step_callback:
-                        step_callback(f"MTool Step 2: Đang bắn thông báo mời Full Admin sang UID {target_uid}...")
-                    resp2 = self.execute_step2(pid, target_uid, s_tk)
-                    if "errors" in resp2:
-                        last_err = f"Step 2 lỗi: {resp2['errors'][0].get('message', resp2['errors'])}"
-                        continue
-
-                    step12_ok = True
-                    break
-                except Exception as e:
-                    last_err = str(e)
-
-        if not step12_ok:
-            result["message"] = last_err or "Không thể thực hiện Step 1 & Step 2 MTool"
-            return result
-
-        if not auto_accept or not receiver_token:
-            result["success"] = True
-            result["status"] = "INVITED_ONLY"
-            result["message"] = f"Đã bắn thông báo mời Admin (MTool Step 2) sang UID {target_uid}"
-            return result
-
-        for remaining in range(5, 0, -1):
+    # --- BƯỚC 1: XÁC THỰC MẬT KHẨU & LẤY NT_BUNDLE_TREE ---
+    for p_uid_try in candidate_pids:
+        if nt_tree:
+            break
+        for tk_try in candidate_tokens:
             if step_callback:
-                step_callback(f"MTool: Đã bắn lời mời! Chờ {remaining}s để lấy invitation_id...")
-            time.sleep(1)
+                step_callback(f"Bước 1/4: Đang xác thực mật khẩu cho Page ({p_uid_try})...")
+            tree, msg1 = xac_nhan_mk(
+                auth_token=tk_try,
+                admin_id=target_uid,
+                profile_id=p_uid_try,
+                password=password,
+                proxy=sender_proxy
+            )
+            last_msg = msg1
+            if tree and extract_payload_from_tree(tree):
+                nt_tree = tree
+                active_token = tk_try
+                active_pid = p_uid_try
+                break
+            elif tree and not nt_tree:
+                nt_tree = tree
+                active_token = tk_try
+                active_pid = p_uid_try
 
-        if step_callback:
-            step_callback("MTool Step 3: Đang dùng Token Mẹ lấy invitation_id...")
+    if not nt_tree:
+        res_out["message"] = last_msg or "Thất bại ở bước xác thực mật khẩu (Step 1)"
+        return res_out
 
-        invitation_id = None
-        for pid in candidate_profile_ids:
+    # --- BƯỚC 2: TRÍCH XUẤT PAYLOAD TỪ NT_BUNDLE_TREE & GỬI LỜI MỜI ---
+    if step_callback:
+        step_callback(f"Bước 2/4: Đang trích xuất URL từ nt_bundle_tree & gửi lời mời tới {target_uid}...")
+    ok2, msg2 = gui_loi_moi(auth_token=active_token, nt_bundle_tree=nt_tree, proxy=sender_proxy)
+    if not ok2:
+        res_out["message"] = msg2
+        return res_out
+
+    # Nếu không có Token tài khoản nhận -> Hoàn tất ở Bước 2 (Đã gửi lời mời)
+    if not receiver_token:
+        res_out["success"] = True
+        res_out["status"] = "INVITED_ONLY"
+        res_out["message"] = f"Đã gửi lời mời Admin sang UID {target_uid} (Chờ bấm chấp nhận)"
+        return res_out
+
+    # --- BƯỚC 3: LẤY INVITATION_ID TỪ TÀI KHOẢN ĐÍCH ---
+    if step_callback:
+        step_callback(f"Bước 3/4: Đang lấy mã invitation_id bên tài khoản nhận ({target_uid})...")
+
+    invitation_id = None
+    msg3 = ""
+    # Thử quét tối đa 2 lần cách nhau 3s để Facebook kịp đồng bộ thông báo lời mời
+    for attempt in range(2):
+        if attempt > 0:
+            time.sleep(3)
+        for p_uid_try in candidate_pids:
+            inv_id, m3 = ktra_loi_moi(
+                auth_token=receiver_token,
+                profile_id=p_uid_try,
+                invitee_id=target_uid,
+                proxy=receiver_proxy or sender_proxy
+            )
+            msg3 = m3
+            if inv_id:
+                invitation_id = inv_id
+                break
+        if invitation_id:
+            break
+
+    if not invitation_id:
+        res_out["success"] = True
+        res_out["status"] = "INVITED_ONLY"
+        res_out["message"] = f"Đã gửi lời mời nhưng chưa lấy được invitation_id ({msg3})"
+        return res_out
+
+    res_out["invitation_id"] = invitation_id
+
+    # --- BƯỚC 4: CHẤP NHẬN LỜI MỜI (AUTO ACCEPT) ---
+    if step_callback:
+        step_callback(f"Bước 4/4: Đang chấp nhận lời mời (invitation_id: {invitation_id})...")
+    ok4, msg4 = xac_nhan_loi_moi(
+        auth_token=receiver_token,
+        invitation_id=invitation_id,
+        accept_invitation=1,
+        proxy=receiver_proxy or sender_proxy
+    )
+    if ok4:
+        res_out["success"] = True
+        res_out["status"] = "SUCCESS"
+        res_out["message"] = f"🎉 Chuyển Page & Auto Accept thành công sang {target_uid}!"
+    else:
+        res_out["success"] = True
+        res_out["status"] = "INVITED_ONLY"
+        res_out["message"] = f"Đã mời (ID: {invitation_id}), lỗi bước 4: {msg4}"
+
+    return res_out
+  # ==============================================================================
+# 6. CÁC HÀM HỖ TRỢ CHỌN PAGE & LÕI REG PAGE PRO5 VIP V5
+# ==============================================================================
+
+def parse_selection(selection_str: str, max_index: int) -> List[int]:
+    indices = []
+    parts = selection_str.replace(" ", "").split(",")
+    for part in parts:
+        if not part:
+            continue
+        if part.lower() == "all":
+            return list(range(1, max_index + 1))
+        if "-" in part:
             try:
-                resp3 = self.execute_step3(pid, target_uid, receiver_token)
-                invitation_id = self.extract_invitation_id(resp3)
-                if invitation_id:
-                    break
-            except Exception as e:
-                last_err = str(e)
-
-        if not invitation_id:
-            result["success"] = True
-            result["status"] = "INVITED_ONLY"
-            result["message"] = f"Đã bắn lời mời sang UID {target_uid} (Chưa lấy được invitation_id để Auto Accept)"
-            return result
-
-        result["invitation_id"] = invitation_id
-
-        if step_callback:
-            step_callback(f"MTool Step 4: Đang Auto Accept lời mời ({invitation_id})...")
-
-        try:
-            resp4 = self.execute_step4(invitation_id, receiver_token)
-            if "errors" not in resp4 and resp4.get("_http_status") == 200:
-                result["success"] = True
-                result["status"] = "SUCCESS"
-                result["message"] = f"Đã chuyển & Auto Accept Full Admin thành công sang UID {target_uid}!"
-            else:
-                result["success"] = True
-                result["status"] = "INVITED_ONLY"
-                result["message"] = f"Đã mời (ID: {invitation_id}), lỗi Auto Accept: {resp4.get('errors', '')}"
-        except Exception as e:
-            result["success"] = True
-            result["status"] = "INVITED_ONLY"
-            result["message"] = f"Đã mời (ID: {invitation_id}), ngoại lệ Step 4: {e}"
-
-        return result
+                start, end = part.split("-")
+                start, end = int(start), int(end)
+                if 1 <= start <= end <= max_index:
+                    indices.extend(range(start, end + 1))
+            except ValueError:
+                continue
+        else:
+            try:
+                idx = int(part)
+                if 1 <= idx <= max_index:
+                    indices.append(idx)
+            except ValueError:
+                continue
+    return sorted(set(indices))
 
 
-# ==============================================================================
-# 6. LÕI REG PAGE PRO5 VIP V5 (BLOKS + REGEX i64.Const + PROFILESWITCHER)
-# ==============================================================================
+def get_token_pages(token: str, profile_id: str, proxy: Optional[str] = None) -> List[Dict[str, str]]:
+    parsed = _fetch_all_pages_raw(token, profile_id, proxy=proxy)
+    if not parsed:
+        logger.error("Không tìm thấy Page nào.")
+        return []
+
+    safe_print("\nDanh sách Page có thể chuyển:")
+    for i, p in enumerate(parsed, 1):
+        safe_print(f"  [{i}] {p['name']} (Page ID: {p['page_id']} | Profile UID: {p['additional_profile_id']})")
+
+    max_idx = len(parsed)
+    while True:
+        choice = input("Chọn Page (ví dụ: 1-5, 1,3,5, hoặc all để chọn tất cả, q để thoát): ").strip()
+        if choice.lower() == "q":
+            return []
+        indices = parse_selection(choice, max_idx)
+        if indices:
+            selected_pages = []
+            for idx in indices:
+                p = parsed[idx - 1]
+                selected_pages.append({
+                    "page_uid": p["additional_profile_id"] or p["page_id"],
+                    "page_token": p["access_token"],
+                    "page_name": p["name"],
+                    "page_id": p["page_id"]
+                })
+            return selected_pages
+        safe_print(f"{Colors.YELLOW}Lựa chọn không hợp lệ, vui lòng nhập lại.{Colors.RESET}")
+
+
+def get_all_pages(token: str, profile_id: str, proxy: Optional[str] = None) -> List[Dict[str, str]]:
+    parsed = _fetch_all_pages_raw(token, profile_id, proxy=proxy)
+    result = []
+    for p in parsed:
+        result.append({
+            "page_uid": p["additional_profile_id"] or p["page_id"],
+            "page_token": p["access_token"],
+            "page_name": p["name"],
+            "page_id": p["page_id"]
+        })
+    return result
+
 
 GRAPHQL_URL = "https://graph.facebook.com/graphql"
 CLIENT_DOC_ID = "11994080426203054249997361787"
@@ -1257,8 +1730,8 @@ class FbPageCreator:
         for attempt in range(1, retries + 1):
             try:
                 r = self.session.get(
-                    f"https://graph.facebook.com/me?fields=id,name&access_token={self.token}",
-                    headers={"User-Agent": self.user_agent},
+                    f"https://graph.facebook.com/v24.0/me?fields=id,name&access_token={self.token}",
+                    headers={"User-Agent": "okhttp/5.1.0"},
                     timeout=20
                 ).json()
                 if isinstance(r, dict) and "id" in r:
@@ -1290,124 +1763,19 @@ class FbPageCreator:
             "message": f"Lỗi kết nối mạng/Proxy: {last_err[:65]}"
         }
 
-    def fetch_profile_switcher_pages(self) -> List[Dict[str, str]]:
-        """
-        Lấy danh sách Page Pro5 trực tiếp qua ProfileSwitcherRootQuery (từ bản Web v5).
-        Trả về đúng Profile ID Pro5 và Access Token của từng Page.
-        """
-        if not self.mother_uid:
-            return []
-        variables = {
-            "profile_switcher_connection_first": 300,
-            "additional_profile_picture_size": 80,
-            "profileID": str(self.mother_uid),
-            "main_profile_picture_size": 80,
-            "scale": "2",
-            "nt_context": {
-                "using_white_navbar": True,
-                "styles_id": "588d028b36bed0e1889e09b60e0f9aea",
-                "pixel_ratio": 2,
-                "is_push_on": True,
-                "debug_tooling_metadata_token": None,
-                "is_flipper_enabled": False,
-                "theme_params": [{"value": [], "design_system_name": "FDS"}],
-                "bloks_version": "338f8ead5977a2c41eba3e92584dcf1d132e8b7928f1f5796662ec064023047d"
-            },
-            "overflow_recent_searches_filter_ids": [],
-            "use_native_entrypoint_for_stars_on_reels": True
-        }
-        payload = {
-            "method": "post",
-            "pretty": "false",
-            "format": "json",
-            "server_timestamps": "true",
-            "locale": "vi_VN",
-            "client_doc_id": "116912609015732060545213902280",
-            "variables": json.dumps(variables)
-        }
-        ps_list = []
-        try:
-            resp = self.session.post(
-                "https://b-graph.facebook.com/graphql",
-                data=payload,
-                headers=self._get_headers("ProfileSwitcherRootQuery"),
-                timeout=20
-            ).json()
-            edges = (
-                resp.get("data", {})
-                .get("user", {})
-                .get("profile_switcher_eligible_profiles", {})
-                .get("edges", [])
-            )
-            for edge in edges:
-                node = edge.get("node", {})
-                profile = node.get("profile", {})
-                token_profile = node.get("session_info", {}).get("access_token", "")
-                p_id = str(profile.get("id", ""))
-                p_name = str(profile.get("name", "")).strip()
-                if p_id and p_id != str(self.mother_uid):
-                    ps_list.append({
-                        "id": p_id,
-                        "name": p_name,
-                        "access_token": token_profile,
-                        "additional_profile_id": p_id
-                    })
-        except Exception:
-            pass
-        return ps_list
-
     def get_all_pages_with_tokens(self) -> Dict[str, Any]:
-        """Kết hợp cả /me/accounts và ProfileSwitcherRootQuery để không bỏ sót bất kỳ Page Pro5 nào."""
+        """Sử dụng _fetch_all_pages_raw kết hợp /v24.0/me/accounts + ProfileSwitcherQuery."""
         try:
-            url = (
-                f"https://graph.facebook.com/me/accounts"
-                f"?fields=id,name,access_token,additional_profile_id,is_published,category"
-                f"&limit=100&access_token={self.token}"
-            )
-            r = self.session.get(url, headers={"User-Agent": self.user_agent}, timeout=25).json()
-            if isinstance(r, dict) and "error" in r:
-                err = r.get("error", {})
-                code = err.get("code", 0)
-                err_msg = err.get("message", "Lỗi khi lấy danh sách Page")
-                is_die = code in FB_TOKEN_DEAD_CODES or "OAuthException" in str(r) or "checkpoint" in str(r).lower()
-                return {"success": False, "is_token_die": is_die, "pages": [], "message": err_msg}
-
-            pages_data = r.get("data", []) if isinstance(r, dict) and isinstance(r.get("data"), list) else []
-            ps_pages = self.fetch_profile_switcher_pages()
-
-            merged_pages = []
-            seen_ids = set()
-
-            for page in pages_data:
-                pid = str(page.get("id", ""))
-                pname = str(page.get("name", "")).strip()
-                ptoken = str(page.get("access_token", ""))
-                add_id = str(page.get("additional_profile_id", ""))
-
-                for ps in ps_pages:
-                    if ps["id"] == pid or ps["id"] == add_id or ps["name"].lower() == pname.lower():
-                        if ps["access_token"]:
-                            ptoken = ps["access_token"]
-                        if not add_id:
-                            add_id = ps["id"]
-                        break
-
-                merged_pages.append({
-                    "id": pid,
-                    "name": pname,
-                    "access_token": ptoken,
-                    "additional_profile_id": add_id
+            raw_list = _fetch_all_pages_raw(self.token, self.mother_uid, proxy=self.proxy)
+            pages = []
+            for p in raw_list:
+                pages.append({
+                    "id": str(p.get("page_id", "")),
+                    "name": str(p.get("name", "")),
+                    "access_token": str(p.get("access_token", "")),
+                    "additional_profile_id": str(p.get("additional_profile_id", "") or p.get("page_id", ""))
                 })
-                seen_ids.add(pid)
-                if add_id:
-                    seen_ids.add(add_id)
-
-            for ps in ps_pages:
-                if ps["id"] not in seen_ids:
-                    merged_pages.append(ps)
-                    seen_ids.add(ps["id"])
-
-            return {"success": True, "is_token_die": False, "pages": merged_pages}
+            return {"success": True, "is_token_die": False, "pages": pages}
         except Exception as e:
             return {"success": False, "is_token_die": False, "pages": [], "message": str(e)}
 
@@ -1415,11 +1783,11 @@ class FbPageCreator:
         tk_to_check = page_token or self.token
         try:
             url = (
-                f"https://graph.facebook.com/{page_id}"
+                f"https://graph.facebook.com/v24.0/{page_id}"
                 f"?fields=id,name,is_published,additional_profile_id,access_token"
                 f"&access_token={tk_to_check}"
             )
-            r = self.session.get(url, headers={"User-Agent": self.user_agent}, timeout=20).json()
+            r = self.session.get(url, headers={"User-Agent": "okhttp/5.1.0"}, timeout=20).json()
             if isinstance(r, dict) and "id" in r:
                 if r.get("is_published", True) is False:
                     return {"success": False, "message": "Page bị hủy đăng (Unpublished)"}
@@ -1428,7 +1796,7 @@ class FbPageCreator:
                     "page_id": str(r["id"]),
                     "page_name": str(r.get("name", "")),
                     "page_token": str(r.get("access_token") or page_token),
-                    "additional_profile_id": str(r.get("additional_profile_id", ""))
+                    "additional_profile_id": str(r.get("additional_profile_id", "") or r["id"])
                 }
             err_msg = (r.get("error") or {}).get("message", "Page DIE hoặc bị khóa") if isinstance(r, dict) else "Page lỗi"
             return {"success": False, "message": err_msg}
@@ -1441,10 +1809,7 @@ class FbPageCreator:
         known_page_ids: set,
         step_callback=None
     ) -> Dict[str, Any]:
-        """
-        Tạo Page Pro5 bằng chuẩn Katana + Bắt Page mới bằng cả Regex bk.action.i64.Const (Web v5),
-        /me/accounts và ProfileSwitcherRootQuery.
-        """
+        """Tạo Page Pro5 chuẩn Katana + Bắt Page mới qua bk.action.i64.Const & ProfileSwitcherQuery."""
         if self.ua_mode == "random":
             self.user_agent = generate_random_katana_ua()
 
@@ -1547,9 +1912,9 @@ class FbPageCreator:
         except Exception as e:
             return {"success": False, "message": f"Lỗi mạng Bước 2: {e}"}
 
-        # --- BƯỚC 3: BẮT ID PAGE MỚI & LẤY TOKEN PAGE (3 TẦNG: REGEX V5 + ME/ACCOUNTS + PROFILESWITCHER) ---
+        # --- BƯỚC 3: QUÉT LẤY PAGE_UID (ADDITIONAL_PROFILE_ID) & PAGE_TOKEN ---
         if step_callback:
-            step_callback(f"Đang bóc ID & lấy Token EAAAAU của Page '{page_name}'...")
+            step_callback(f"Đang bóc ID & lấy Token Page Pro5 của '{page_name}'...")
 
         candidate_ids = set(re.findall(r"\(bk\.action\.i64\.Const,\s*(\d{10,})\)", body2 or ""))
         new_page_obj = None
@@ -1557,12 +1922,8 @@ class FbPageCreator:
         for _ in range(1, 4):
             time.sleep(3)
             scan_res = self.get_all_pages_with_tokens()
-            if scan_res.get("is_token_die"):
-                return {"success": False, "is_token_die": True, "message": "Token DIE khi đang lấy Token Page"}
-
             pages_list = scan_res.get("pages", [])
 
-            # Tầng 1: Khớp ID bóc trực tiếp từ bk.action.i64.Const của Bloks response
             for p in pages_list:
                 pid = str(p.get("id", ""))
                 add_id = str(p.get("additional_profile_id", ""))
@@ -1570,15 +1931,14 @@ class FbPageCreator:
                     new_page_obj = p
                     break
 
-            # Tầng 2: Tìm Page có ID mới chưa nằm trong known_page_ids
             if not new_page_obj:
                 for p in pages_list:
                     pid = str(p.get("id", ""))
-                    if pid and pid not in known_page_ids:
+                    add_id = str(p.get("additional_profile_id", ""))
+                    if pid and pid not in known_page_ids and add_id not in known_page_ids:
                         new_page_obj = p
                         break
 
-            # Tầng 3: Khớp theo tên Page vừa đặt
             if not new_page_obj:
                 for p in pages_list:
                     if str(p.get("name", "")).strip().lower() == page_name.strip().lower():
@@ -1597,13 +1957,13 @@ class FbPageCreator:
 
         page_id = str(new_page_obj.get("id", ""))
         extracted_page_token = str(new_page_obj.get("access_token", ""))
-        add_profile_id = str(new_page_obj.get("additional_profile_id", ""))
+        add_profile_id = str(new_page_obj.get("additional_profile_id", "") or page_id)
 
-        if not extracted_page_token or not add_profile_id:
+        if not extracted_page_token:
             p_detail = self.check_single_page_live(page_id, extracted_page_token)
             if p_detail.get("success"):
-                extracted_page_token = extracted_page_token or p_detail.get("page_token", "")
-                add_profile_id = add_profile_id or p_detail.get("additional_profile_id", "")
+                extracted_page_token = p_detail.get("page_token", "")
+                add_profile_id = p_detail.get("additional_profile_id", "") or add_profile_id
 
         return {
             "success": True,
@@ -1614,7 +1974,6 @@ class FbPageCreator:
         }
 
     def upload_media(self, page_id: str, page_token: str, media_type: str = "avatar") -> Dict[str, Any]:
-        """Tự động Up Avatar AI hoặc Ảnh bìa cho Page mới (từ Reg Page Web v5)."""
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         if media_type == "avatar":
             sources = [
@@ -1685,118 +2044,6 @@ class FbPageCreator:
         except Exception as e:
             return {"success": False, "message": str(e)[:60]}
 
-    def invite_holder_mtool(
-        self,
-        page_id: str,
-        page_token: str,
-        password: str,
-        holder_uid: str,
-        holder_token: Optional[str] = None,
-        holder_proxy: Optional[str] = None,
-        additional_profile_id: str = "",
-        step_callback=None
-    ) -> Dict[str, Any]:
-        holder_uid = str(holder_uid).strip()
-        if not holder_uid and holder_token:
-            try:
-                r_me = requests.get(
-                    f"https://graph.facebook.com/me?fields=id&access_token={holder_token}",
-                    proxies=parse_proxy(holder_proxy) or self.proxies,
-                    timeout=15,
-                    verify=False
-                ).json()
-                holder_uid = str(r_me.get("id", ""))
-            except Exception:
-                pass
-
-        if not holder_uid:
-            return {"success": False, "message": "Thiếu UID Nick Mẹ"}
-
-        if password:
-            manager = FacebookAdminManager(sender_proxy=self.proxy, receiver_proxy=holder_proxy or self.proxy)
-            auto_acc = bool(holder_token)
-            mtool_res = manager.transfer_page(
-                page_id=page_id,
-                sender_token=self.token,
-                password=password,
-                target_uid=holder_uid,
-                receiver_token=holder_token,
-                auto_accept=auto_acc,
-                additional_profile_id=additional_profile_id,
-                page_token=page_token,
-                step_callback=step_callback
-            )
-            if mtool_res.get("success"):
-                return {
-                    "success": True,
-                    "status": mtool_res.get("status"),
-                    "invitation_id": mtool_res.get("invitation_id"),
-                    "message": mtool_res.get("message")
-                }
-            mtool_err = mtool_res.get("message", "Lỗi MTool")
-        else:
-            mtool_err = "Thiếu mật khẩu Nick Reg cho Step 1 MTool"
-
-        if step_callback:
-            step_callback(f"Đang thử phương thức dự phòng GraphQL cho UID {holder_uid}...")
-
-        invited_ok = False
-        actor_pro5 = str(additional_profile_id or page_id)
-        invite_doc_ids = ["6022111457862078", "5367441956638909", "7219129478152946"]
-        auth_pairs = [
-            (page_token, actor_pro5),
-            (self.token, actor_pro5),
-            (self.token, str(self.mother_uid or page_id))
-        ]
-
-        for tk, act_id in auth_pairs:
-            if not tk or invited_ok:
-                continue
-            for doc_id in invite_doc_ids:
-                try:
-                    variables = {
-                        "input": {
-                            "additional_profile_id": actor_pro5,
-                            "page_id": str(page_id),
-                            "invitee_id": str(holder_uid),
-                            "admin_type": "FULL_ADMIN",
-                            "actor_id": act_id,
-                            "client_mutation_id": str(uuid.uuid4())
-                        }
-                    }
-                    gql_data = {
-                        "method": "post", "pretty": "false", "format": "json", "server_timestamps": "true",
-                        "locale": "vi_VN", "fb_api_req_friendly_name": "ProfilePlusCoreAdminInviteMutation",
-                        "fb_api_caller_class": "graphservice", "doc_id": doc_id,
-                        "variables": json.dumps(variables), "client_trace_id": str(uuid.uuid4())
-                    }
-                    r_gql = self.session.post(
-                        GRAPHQL_URL,
-                        headers=self._get_headers("ProfilePlusCoreAdminInviteMutation", token_override=tk),
-                        data=gql_data,
-                        timeout=20
-                    )
-                    res_json = r_gql.json()
-                    if "error" not in res_json and "errors" not in res_json and res_json.get("data") and any(res_json["data"].values()):
-                        invited_ok = True
-                        break
-                except Exception:
-                    pass
-
-        if invited_ok:
-            return {
-                "success": True,
-                "status": "INVITED_ONLY",
-                "invitation_id": None,
-                "message": f"Đã bắn lời mời Admin (GraphQL) sang UID {holder_uid}"
-            }
-        return {
-            "success": False,
-            "status": "FAILED",
-            "invitation_id": None,
-            "message": f"Lỗi bắn sang UID {holder_uid}: {mtool_err[:55]}"
-        }
-
 
 # ==============================================================================
 # 7. BẢNG THEO DÕI TRỰC TIẾP + KHUNG NHẬT KÝ QUÁ TRÌNH CHI TIẾT
@@ -1843,7 +2090,7 @@ def render_dashboard(accounts: List[AccountTask], stats: Dict[str, int]):
     lines.append(f"{Colors.BOLD}{Colors.CYAN}" + "=" * w + f"{Colors.RESET}")
     lines.append(
         f"{Colors.BOLD}{Colors.YELLOW}"
-        f"     BẢNG TIẾN TRÌNH VIP: NẠP ACC -> REG PAGE V5 -> GET TOKEN PAGE -> CHECK LIVE -> CHUYỂN PAGE MTOOL     "
+        f"   BẢNG TIẾN TRÌNH VIP: NẠP ACC -> REG PAGE V5 -> CHECK LIVE -> CHUYỂN PAGE SIÊU MẠNH (NT_BUNDLE_TREE)   "
         f"{Colors.RESET}"
     )
     lines.append(f"{Colors.BOLD}{Colors.CYAN}" + "=" * w + f"{Colors.RESET}")
@@ -1883,7 +2130,7 @@ def render_dashboard(accounts: List[AccountTask], stats: Dict[str, int]):
         f" {Colors.BOLD}[THỐNG KÊ]{Colors.RESET} Tổng Acc: {len(accounts)} | "
         f"Acc Có Page Sống: {Colors.GREEN}{stats.get('total_holder_acc', 0)}{Colors.RESET} "
         f"(Page Sống: {Colors.GREEN}{stats.get('total_pages', 0)}{Colors.RESET} | "
-        f"Chuyển MTool OK: {Colors.CYAN}{stats.get('total_invited', 0)}{Colors.RESET}) | "
+        f"Chuyển Page OK: {Colors.CYAN}{stats.get('total_invited', 0)}{Colors.RESET}) | "
         f"Xịt/Die Page: {Colors.MAGENTA}{stats.get('total_no_page', 0)}{Colors.RESET} | "
         f"Limit: {Colors.YELLOW}{stats.get('total_limited', 0)}{Colors.RESET} | "
         f"Lỗi Mạng: {Colors.YELLOW}{stats.get('total_net_err', 0)}{Colors.RESET} | "
@@ -1891,7 +2138,7 @@ def render_dashboard(accounts: List[AccountTask], stats: Dict[str, int]):
     )
     lines.append(f"{Colors.BOLD}{Colors.CYAN}" + "=" * w + f"{Colors.RESET}")
 
-    lines.append(f"{Colors.BOLD}{Colors.MAGENTA} 📋 NHẬT KÝ QUÁ TRÌNH CHI TIẾT (LOGIN/CHECK -> TẠO PAGE V5 -> CHECK LIVE -> BẮN ADMIN MTOOL):{Colors.RESET}")
+    lines.append(f"{Colors.BOLD}{Colors.MAGENTA} 📋 NHẬT KÝ QUÁ TRÌNH CHI TIẾT (LOGIN/CHECK -> TẠO PAGE V5 -> CHECK LIVE -> CHUYỂN PAGE 4 BƯỚC):{Colors.RESET}")
     with LOG_LOCK:
         if not LIVE_PROCESS_LOGS:
             lines.append("   (Đang khởi tạo luồng xử lý...)")
@@ -1914,7 +2161,7 @@ def dashboard_render_loop(accounts: List[AccountTask], stats: Dict[str, int], st
 
 
 # ==============================================================================
-# 8. LUỒNG XỬ LÝ CHÍNH CHO TỪNG TÀI KHOẢN
+# 8. LUỒNG XỬ LÝ CHÍNH CHO TỪNG TÀI KHOẢN (REG PAGE + CHUYỂN PAGE SIÊU MẠNH)
 # ==============================================================================
 
 def process_single_account_workflow(
@@ -1928,7 +2175,7 @@ def process_single_account_workflow(
 ):
     acc.status = "running"
 
-    # --- BƯỚC 0: NẾU DÒNG ACC CHƯA CÓ TOKEN EAAAAU -> TỰ ĐỘNG LOGIN BLOKS CAA V5 LẤY TOKEN ---
+    # --- BƯỚC 0: TỰ ĐỘNG LOGIN BLOKS CAA V5 NẾU CHƯA CÓ TOKEN EAAAAU ---
     if not acc.token:
         acc.current_action = f"[L{thread_id}] Đang tự động Login lấy Token EAAAAU cho UID {acc.pre_uid}..."
         add_process_log(acc.acc_id, acc.pre_uid, "Chưa có sẵn EAAAAU -> Đang tự động Login Bloks CAA v5 để lấy Token...")
@@ -1967,9 +2214,8 @@ def process_single_account_workflow(
     acc_info = acc.creator.check_account_live(retries=3)
 
     if not acc_info.get("success"):
-        # Nếu Token có sẵn trong dòng bị hết hạn nhưng có kèm UID + Pass -> Thử Login lại lấy Token mới
         if acc_info.get("is_token_die") and acc.pre_uid and acc.password:
-            add_process_log(acc.acc_id, acc.pre_uid, f"{Colors.YELLOW}⚠️ Token cũ hết hạn -> Đang tự động Login lại bằng Pass để lấy Token mới...{Colors.RESET}")
+            add_process_log(acc.acc_id, acc.pre_uid, f"{Colors.YELLOW}⚠️ Token cũ hết hạn -> Đang Login lại bằng Pass để lấy Token mới...{Colors.RESET}")
             re_login = login_and_get_token({
                 "uid": acc.pre_uid,
                 "pwd": acc.password,
@@ -2009,14 +2255,20 @@ def process_single_account_workflow(
     acc.mother_name = acc_info.get("name", "Facebook User")
 
     pre_pages_res = acc.creator.get_all_pages_with_tokens()
-    known_page_ids = {str(p.get("id", "")) for p in pre_pages_res.get("pages", []) if p.get("id")}
+    known_page_ids = set()
+    for p in pre_pages_res.get("pages", []):
+        if p.get("id"):
+            known_page_ids.add(str(p["id"]))
+        if p.get("additional_profile_id"):
+            known_page_ids.add(str(p["additional_profile_id"]))
+
     add_process_log(
         acc.acc_id,
         acc.mother_uid,
-        f"{Colors.GREEN}✔ Nick LIVE ({acc.mother_name}) - Có sẵn {len(known_page_ids)} Page cũ.{Colors.RESET}"
+        f"{Colors.GREEN}✔ Nick LIVE ({acc.mother_name}) - Có sẵn {len(pre_pages_res.get('pages', []))} Page cũ.{Colors.RESET}"
     )
 
-    # --- BƯỚC 2 & 3: TẠO PAGE PRO5 V5 VÀ GET LUÔN TOKEN PAGE ---
+    # --- BƯỚC 2 & 3: TẠO PAGE PRO5 V5 VÀ GET LUÔN PAGE_TOKEN + PAGE_UID ---
     newly_created_pages: List[Dict[str, str]] = []
     hit_limit = False
     hit_restricted = False
@@ -2058,11 +2310,10 @@ def process_single_account_workflow(
             p_id = create_res["page_id"]
             p_name = create_res["page_name"]
             p_token = create_res["page_token"]
-            add_prof_id = create_res.get("additional_profile_id", "")
+            add_prof_id = create_res.get("additional_profile_id", "") or p_id
 
             known_page_ids.add(p_id)
-            if add_prof_id:
-                known_page_ids.add(add_prof_id)
+            known_page_ids.add(add_prof_id)
 
             newly_created_pages.append({
                 "id": p_id,
@@ -2073,14 +2324,13 @@ def process_single_account_workflow(
             acc.pages_created = len(newly_created_pages)
 
             short_ptk = f"{p_token[:16]}..." if p_token else "Chưa cấp riêng"
-            acc.current_action = f"[L{thread_id}] Đã tạo Page {p_id} & Get Token ({short_ptk})"
+            acc.current_action = f"[L{thread_id}] Đã tạo Page {p_id} (UID: {add_prof_id}) & Get Token"
             add_process_log(
                 acc.acc_id,
                 acc.mother_uid,
-                f"{Colors.GREEN}🎉 Tạo thành công Page '{p_name}' (ID: {p_id}) | Token: {short_ptk}{Colors.RESET}"
+                f"{Colors.GREEN}🎉 Tạo thành công Page '{p_name}' (ID: {p_id} | ProfileUID: {add_prof_id}) | Token: {short_ptk}{Colors.RESET}"
             )
 
-            # Tùy chọn tự động Up Avatar + Ảnh bìa + Đăng bài Welcome từ bản Web v5
             if acc.auto_buff_media and p_token:
                 acc.current_action = f"[L{thread_id}] Đang Up Avatar & Ảnh bìa cho Page '{p_name}'..."
                 av_res = acc.creator.upload_media(p_id, p_token, "avatar")
@@ -2114,7 +2364,7 @@ def process_single_account_workflow(
                     f.write(f"{acc.mother_uid}|{acc.password}|{acc.token}|KHONG_LEN_PAGE\n")
             return
 
-    # --- BƯỚC 4: ĐỢI ĐẾM NGƯỢC & CHECK XEM TÀI KHOẢN VÀ PAGE CÒN SỐNG KHÔNG ---
+    # --- BƯỚC 4: ĐỢI ĐẾM NGƯỢC & CHECK LIVE LẠI TÀI KHOẢN + PAGE ---
     acc.status = "waiting_check"
     wait_seconds = max(1, int(verify_delay))
     add_process_log(
@@ -2140,14 +2390,24 @@ def process_single_account_workflow(
                 f.write(f"{acc.mother_uid}|{acc.password}|{acc.token}|DIE_SAU_{wait_seconds}S\n")
         return
 
+    # Quét lại ProfileSwitcher một lần nữa để đảm bảo có sw_token & additional_profile_id chuẩn nhất
+    latest_pages_map = {
+        p["page_id"]: p
+        for p in _fetch_all_pages_raw(acc.token, acc.mother_uid, proxy=acc.proxy)
+    }
+
     live_pages: List[Dict[str, Any]] = []
     for p in newly_created_pages:
         p_id = p["id"]
-        p_tk = p["access_token"]
-        page_live_res = acc.creator.check_single_page_live(page_id=p_id, page_token=p_tk)
+        if p_id in latest_pages_map:
+            sw_item = latest_pages_map[p_id]
+            p["access_token"] = sw_item.get("access_token") or p["access_token"]
+            p["additional_profile_id"] = sw_item.get("additional_profile_id") or p["additional_profile_id"]
+
+        page_live_res = acc.creator.check_single_page_live(page_id=p_id, page_token=p["access_token"])
         if page_live_res.get("success"):
-            p["access_token"] = page_live_res.get("page_token") or p_tk
-            p["additional_profile_id"] = page_live_res.get("additional_profile_id") or p.get("additional_profile_id", "")
+            p["access_token"] = page_live_res.get("page_token") or p["access_token"]
+            p["additional_profile_id"] = page_live_res.get("additional_profile_id") or p.get("additional_profile_id") or p_id
             live_pages.append(p)
             add_process_log(
                 acc.acc_id,
@@ -2170,7 +2430,7 @@ def process_single_account_workflow(
                 f.write(f"{acc.mother_uid}|{acc.password}|{acc.token}|PAGE_DIE_SAU_{wait_seconds}S\n")
         return
 
-    # --- BƯỚC 5: CHUYỂN PAGE & AUTO ACCEPT SANG NICK MẸ BẰNG MTOOL MAX ---
+    # --- BƯỚC 5: CHUYỂN PAGE SIÊU MẠNH (TRÍCH XUẤT NT_BUNDLE_TREE ĐỘNG 4 BƯỚC) ---
     acc.pages_created = len(live_pages)
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     page_summary_list = []
@@ -2180,23 +2440,25 @@ def process_single_account_workflow(
         p_id = str(p["id"])
         p_name = str(p["name"])
         p_token = str(p["access_token"])
-        add_prof_id = str(p.get("additional_profile_id", ""))
+        p_uid = str(p.get("additional_profile_id") or p_id)
         page_summary_list.append(f"{p_id}:{p_name}")
 
         if acc.holder_uid or acc.holder_token:
-            def mtool_cb(msg_step: str):
+            def super_cb(msg_step: str):
                 acc.current_action = f"[L{thread_id}] {msg_step}"
                 add_process_log(acc.acc_id, acc.mother_uid, f"🚀 {msg_step}")
 
-            tr_res = acc.creator.invite_holder_mtool(
+            tr_res = execute_super_transfer(
+                page_uid=p_uid,
                 page_id=p_id,
                 page_token=p_token,
+                sender_token=acc.token,
                 password=acc.password,
-                holder_uid=acc.holder_uid,
-                holder_token=acc.holder_token,
-                holder_proxy=acc.holder_proxy,
-                additional_profile_id=add_prof_id,
-                step_callback=mtool_cb
+                target_uid=acc.holder_uid,
+                receiver_token=acc.holder_token,
+                sender_proxy=acc.proxy,
+                receiver_proxy=acc.holder_proxy,
+                step_callback=super_cb
             )
             p["transfer_ok"] = tr_res.get("success", False)
             p["transfer_status"] = tr_res.get("status", "FAILED")
@@ -2273,14 +2535,14 @@ def worker_reg_account(
 
 
 # ==============================================================================
-# 9. MENU [1]: REG PAGE VIP V5 -> CHECK LIVE -> CHUYỂN PAGE & AUTO ACCEPT MTOOL
+# 9. MENU [1]: REG PAGE VIP V5 -> CHECK LIVE -> CHUYỂN PAGE SIÊU MẠNH 4 BƯỚC
 # ==============================================================================
 
 def run_reg_page_menu():
     print_banner()
-    safe_print(f"{Colors.BOLD}{Colors.MAGENTA}=== [1] REG PAGE VIP V5 -> GET TOKEN PAGE -> CHECK LIVE -> CHUYỂN PAGE MTOOL ==={Colors.RESET}\n")
+    safe_print(f"{Colors.BOLD}{Colors.MAGENTA}=== [1] REG PAGE VIP V5 -> CHECK LIVE -> CHUYỂN PAGE SIÊU MẠNH (NT_BUNDLE_TREE) ==={Colors.RESET}\n")
 
-    safe_print(f"{Colors.CYAN}--- [1/8] NẠP DANH SÁCH ACC (NHẬN MỌI BIẾN THỂ ĐỊNH DẠNG) ---{Colors.RESET}")
+    safe_print(f"{Colors.CYAN}--- [1/8] NẠP DANH SÁCH ACC NGUỒN (NHẬN MỌI BIẾN THỂ ĐỊNH DẠNG) ---{Colors.RESET}")
     safe_print("Hỗ trợ: UID|Pass|Cookie|Token, UID|Pass|Token, UID|Pass|Cookie, UID|Pass|2FA, hoặc chỉ Token")
     safe_print("[1] Dán trực tiếp vào màn hình (tự động bóc tách)")
     safe_print("[2] Đọc từ file (mặc định tokens.txt hoặc accounts.txt)")
@@ -2312,25 +2574,43 @@ def run_reg_page_menu():
         f"(Có sẵn Token: {has_tk_count} | Có sẵn Mật khẩu: {has_pwd_count} | Cần tự Login lấy Token: {len(parsed_items) - has_tk_count}){Colors.RESET}\n"
     )
 
-    # 2. Nhập Nick Mẹ nhận Page
-    safe_print(f"{Colors.CYAN}--- [2/8] CẤU HÌNH NICK MẸ NHẬN PAGE (CHUẨN MTOOL MAX 4 BƯỚC) ---{Colors.RESET}")
-    safe_print("- Chỉ bắn lời mời (Step 1 + Step 2): Nhập UID_ME (VD: 100012345678)")
-    safe_print("- Bắn lời mời + Auto Accept Full 4 bước: Nhập UID_ME|TOKEN_ME")
-    safe_print("- Để trống và nhấn Enter -> Chỉ tạo Page, Get Token Page và lưu file.")
-    h_raw = input("Nhập thông tin Nick Mẹ: ").strip()
+    # 2. Cấu hình Nick Mẹ nhận Page
+    safe_print(f"{Colors.CYAN}--- [2/8] CẤU HÌNH TÀI KHOẢN ĐÍCH (NICK MẸ NHẬN PAGE) ---{Colors.RESET}")
+    safe_print("- Nhập TOKEN Nick Mẹ (EAAAAU...) hoặc UID_ME|TOKEN_ME -> Chạy FULL 4 BƯỚC (Tự động lấy invitation_id & Auto Accept)")
+    safe_print("- Nhập chỉ UID_ME (VD: 100012345678)                  -> Chạy Bước 1 + Bước 2 (Gửi lời mời, tự bấm chấp nhận tay)")
+    safe_print("- Để trống và nhấn Enter                              -> Chỉ tạo Page, Get Token Page và lưu file.")
+    h_raw = input("Nhập Token hoặc UID Nick Mẹ nhận Page: ").strip()
 
     holder_targets = parse_holder_target(h_raw)
+    valid_targets = []
+    for t in holder_targets:
+        if t.get("token") and not t.get("uid"):
+            info_nhan = get_id(t["token"], proxy=t.get("proxy"))
+            if info_nhan:
+                t["uid"], t_name = info_nhan
+                safe_print(f"{Colors.GREEN}✔ Đã xác thực Token Nick Mẹ: {t_name} (ID: {t['uid']}) -> Bật Auto Accept Full 4 Bước!{Colors.RESET}")
+                valid_targets.append(t)
+            else:
+                safe_print(f"{Colors.RED}✗ Token Nick Mẹ không hợp lệ hoặc đã DIE!{Colors.RESET}")
+        elif t.get("uid"):
+            if t.get("token"):
+                info_nhan = get_id(t["token"], proxy=t.get("proxy"))
+                t_name = info_nhan[1] if info_nhan else "Nick Mẹ"
+                safe_print(f"{Colors.GREEN}✔ Đã nhận diện Nick Mẹ: {t_name} (ID: {t['uid']}) -> Bật Auto Accept Full 4 Bước!{Colors.RESET}")
+            else:
+                safe_print(f"{Colors.GREEN}✔ Đã nhận diện UID Nick Mẹ: {t['uid']} -> Chế độ bắn lời mời Bước 1 & 2.{Colors.RESET}")
+            valid_targets.append(t)
+
+    holder_targets = valid_targets
     default_pwd = ""
 
     if holder_targets:
-        has_auto_acc = any(t.get("token") for t in holder_targets)
-        mode_str = "FULL 4 BƯỚC (Bắn lời mời + Auto Accept)" if has_auto_acc else "2 BƯỚC ĐẦU (Xác thực Pass + Bắn thông báo mời)"
-        safe_print(f"{Colors.GREEN}✔ Chế độ chuyển Page MTool Max: {mode_str}{Colors.RESET}")
         if has_pwd_count < len(parsed_items):
+            safe_print(f"{Colors.YELLOW}Lưu ý: Bước 1 (xac_nhan_mk) bắt buộc phải có mật khẩu của Nick Reg để lấy nt_bundle_tree.{Colors.RESET}")
             default_pwd = input("Nhập Mật khẩu mặc định cho các Acc chưa kèm pass (Enter nếu bỏ qua): ").strip()
         safe_print("")
     else:
-        safe_print(f"{Colors.YELLOW}Không nhập Nick Mẹ -> Chỉ tạo Page, Get Token Page và lưu vào acc_cam_page.txt.{Colors.RESET}\n")
+        safe_print(f"{Colors.YELLOW}Không cấu hình Nick Mẹ -> Chỉ tạo Page, Get Token Page và lưu vào acc_cam_page.txt.{Colors.RESET}\n")
 
     # 3. Tên Page
     safe_print(f"{Colors.CYAN}--- [3/8] CHỌN LOẠI TÊN PAGE ---{Colors.RESET}")
@@ -2356,7 +2636,7 @@ def run_reg_page_menu():
     safe_print("")
 
     # 4. Tự động Up Avatar/Cover/Post
-    safe_print(f"{Colors.CYAN}--- [4/8] TỰ ĐỘNG UP AVATAR, ẢNH BÌA & BÀI ĐĂNG CHO PAGE MỚI (TỪ WEB V5) ---{Colors.RESET}")
+    safe_print(f"{Colors.CYAN}--- [4/8] TỰ ĐỘNG UP AVATAR, ẢNH BÌA & BÀI ĐĂNG CHO PAGE MỚI ---{Colors.RESET}")
     buff_choice = input("Có tự động Up Avatar + Ảnh bìa + Đăng bài Welcome sau khi tạo Page không? (y/n, mặc định n): ").strip().lower()
     auto_buff_media = (buff_choice == "y")
     safe_print("")
@@ -2485,127 +2765,353 @@ def run_reg_page_menu():
     dashboard_thread.join(timeout=1.5)
     render_dashboard(account_tasks, stats)
 
-    safe_print("\n" + "=" * 98)
+    safe_print("\n" + "=" * 100)
     safe_print(f"{Colors.GREEN}{Colors.BOLD} HOÀN TẤT TIẾN TRÌNH!{Colors.RESET}")
     safe_print(f"- Số Acc sống & có Page sống sau {verify_delay}s: {Colors.GREEN}{stats['total_holder_acc']} Acc ({stats['total_pages']} Page){Colors.RESET}")
-    safe_print(f"- Số Page đã gửi lời mời / Auto Accept MTool sang Nick Mẹ: {Colors.CYAN}{stats['total_invited']} Page{Colors.RESET}")
+    safe_print(f"- Số Page đã chuyển / gửi lời mời thành công sang Nick Mẹ: {Colors.CYAN}{stats['total_invited']} Page{Colors.RESET}")
     safe_print(f"- Số Acc không lên Page hoặc Page bị hủy đăng: {Colors.MAGENTA}{stats['total_no_page']}{Colors.RESET}")
     safe_print(f"- Số Acc gặp Limit: {Colors.YELLOW}{stats['total_limited']}{Colors.RESET}")
     safe_print(f"- Số Acc gặp lỗi Mạng/Proxy (đã bảo toàn, không ghi vào acc_die): {Colors.YELLOW}{stats['total_net_err']}{Colors.RESET}")
     safe_print(f"- Số Acc bị Token DIE / Checkpoint: {Colors.RED}{stats['total_token_die']}{Colors.RESET}")
     safe_print(f"- File lưu đầy đủ (UID|Pass|Token|PageID|PageName|PageToken|TrạngThái): {Colors.CYAN}acc_cam_page.txt{Colors.RESET}")
     safe_print(f"- File lưu danh sách Page riêng: {Colors.CYAN}created_pages.txt{Colors.RESET}")
-    if holder_targets:
-        safe_print(f"- Link duyệt lời mời Admin trên Nick Mẹ (nếu không bật Auto Accept): {Colors.YELLOW}https://www.facebook.com/pages/?category=invites{Colors.RESET}")
-    safe_print("=" * 98 + "\n")
+    safe_print(f"- File nhật ký chi tiết chuyển Page: {Colors.CYAN}transfer_page.log{Colors.RESET}")
+    safe_print("=" * 100 + "\n")
     input("Nhấn Enter để quay lại menu chính...")
 
 
 # ==============================================================================
-# 10. MENU [2]: QUÉT TOÀN BỘ PAGE TRONG ACC & CHUYỂN PAGE HÀNG LOẠT (MTOOL 4 BƯỚC)
+# 10. MENU [2]: CÔNG CỤ CHUYỂN QUYỀN QUẢN TRỊ PAGE SIÊU MẠNH (CHẾ ĐỘ ĐỘC LẬP)
 # ==============================================================================
 
-def run_standalone_mtool_transfer_menu():
-    print_banner()
-    safe_print(f"{Colors.BOLD}{Colors.MAGENTA}=== [2] QUÉT & CHUYỂN PAGE PRO5 HÀNG LOẠT + AUTO ACCEPT (MTOOL MAX 4 BƯỚC) ==={Colors.RESET}\n")
-    safe_print("[1] Dán danh sách Acc cầm Page (UID|Pass|Cookie|Token hoặc UID|Pass|Token) -> Tự quét mọi Page & chuyển hết sang Nick Mẹ")
-    safe_print("[2] Nhập trực tiếp ID Page cụ thể (PAGE_ID|TOKEN_CAM_PAGE|MAT_KHAU|UID_NHAN|TOKEN_NHAN)")
-    mode = input("Chọn chế độ (1 hoặc 2, mặc định 1): ").strip() or "1"
+def setup_source_account_interactive(account_index: int, allow_cancel: bool = True) -> Optional[Dict[str, Any]]:
+    safe_print(f"\n{Colors.BLUE}===== TÀI KHOẢN NGUỒN {account_index} ====={Colors.RESET}")
+    if allow_cancel:
+        safe_print("(Nhấn Enter để bỏ trống và kết thúc nhập tài khoản nguồn)")
 
-    if mode == "1":
-        raw_lines = input_multiline("Dán danh sách Acc đang cầm Page vào đây:")
-        accs = parse_universal_lines(raw_lines)
-        if not accs:
-            safe_print(f"{Colors.RED}[!] Không nhận diện được Acc nào hợp lệ.{Colors.RESET}")
-            input("\nNhấn Enter để quay lại...")
-            return
+    while True:
+        raw_in = input(f"Nhập Token (hoặc dòng UID|Pass|Cookie|Token) của tài khoản nguồn {account_index}: ").strip()
+        if not raw_in:
+            if allow_cancel:
+                return None
+            safe_print("Dữ liệu không được để trống.")
+            continue
 
-        h_raw = input("Nhập Nick Mẹ nhận Page (UID_ME hoặc UID_ME|TOKEN_ME để Auto Accept): ").strip()
-        targets = parse_holder_target(h_raw)
-        if not targets:
-            safe_print(f"{Colors.RED}[!] Bạn chưa nhập UID Nick Mẹ.{Colors.RESET}")
-            input("\nNhấn Enter để quay lại...")
-            return
+        parsed = parse_universal_line(raw_in)
+        token_acc_page = parsed["token"] if parsed and parsed.get("token") else raw_in
+        pwd_parsed = parsed.get("pwd", "") if parsed else ""
+        px_parsed = parsed.get("proxy") if parsed else None
 
-        for idx, it in enumerate(accs, 1):
-            uid = it.get("uid", "")
-            pwd = it.get("pwd", "")
-            tk = it.get("token", "")
-            px = it.get("proxy")
-            target = targets[(idx - 1) % len(targets)]
+        if not token_acc_page.startswith("EAAAA") and parsed and parsed.get("uid") and parsed.get("pwd"):
+            safe_print(f"{Colors.YELLOW}Đang tự động Login lấy Token cho UID {parsed['uid']}...{Colors.RESET}")
+            l_res = login_and_get_token(parsed)
+            if l_res.get("success"):
+                token_acc_page = l_res["token"]
 
-            if not tk:
-                safe_print(f"{Colors.YELLOW}[{idx}/{len(accs)}] Đang Login lấy Token cho Acc {uid}...{Colors.RESET}")
-                l_res = login_and_get_token(it)
-                if not l_res.get("success"):
-                    safe_print(f"{Colors.RED}  -> Lỗi Login Acc {uid}: {l_res.get('message')}{Colors.RESET}")
-                    continue
-                tk = l_res["token"]
+        info = get_id(token_acc_page, proxy=px_parsed)
+        if info is None:
+            safe_print(f"{Colors.RED}✗ Token không hợp lệ hoặc không lấy được thông tin tài khoản. Vui lòng nhập lại.{Colors.RESET}")
+            continue
 
-            creator = FbPageCreator(token=tk, proxy=px)
-            u_info = creator.check_account_live(retries=2)
-            if not u_info.get("success"):
-                safe_print(f"{Colors.RED}[{idx}/{len(accs)}] Acc {uid} lỗi/DIE: {u_info.get('message')}{Colors.RESET}")
+        id_acc, name_acc = info
+        safe_print(f"{Colors.GREEN}✓ Tài khoản nguồn {account_index}: {name_acc} (ID: {id_acc}){Colors.RESET}")
+        break
+
+    while True:
+        safe_print(f"\nĐang lấy danh sách Page của tài khoản nguồn {account_index}...")
+        selected_pages = get_token_pages(token_acc_page, id_acc, proxy=px_parsed)
+        if selected_pages:
+            break
+        retry = input(
+            f"\n{Colors.YELLOW}! Không có Page nào được chọn cho tài khoản nguồn {account_index}.{Colors.RESET}\n"
+            f"  Nhập 'r' để thử lại, 't' để đổi token khác, hoặc 'q' để hủy: "
+        ).strip().lower()
+        if retry == "q":
+            return None
+        if retry == "t":
+            return setup_source_account_interactive(account_index, allow_cancel=allow_cancel)
+
+    if pwd_parsed:
+        safe_print(f"{Colors.GREEN}✓ Đã tự động nhận mật khẩu từ dòng nhập: {pwd_parsed}{Colors.RESET}")
+        mk = pwd_parsed
+    else:
+        mk = input(f"\nNhập mật khẩu của tài khoản nguồn {account_index}: ").strip()
+
+    return {
+        "index": account_index,
+        "id": id_acc,
+        "name": name_acc,
+        "token": token_acc_page,
+        "password": mk,
+        "proxy": px_parsed,
+        "pages": selected_pages
+    }
+
+
+def setup_source_from_universal_lines(lines: List[str]) -> List[Dict[str, Any]]:
+    """
+    Hỗ trợ đọc mọi biến thể dòng: UID|Pass|Token, UID|Pass|Cookie|Token, UID|Pass|Cookie...
+    Tự động chọn TẤT CẢ Page cho từng tài khoản nguồn.
+    """
+    creds = parse_universal_lines(lines)
+    if not creds:
+        safe_print(f"{Colors.RED}✗ Không tìm thấy tài khoản hợp lệ nào.{Colors.RESET}")
+        return []
+
+    safe_print(f"\n{Colors.CYAN}→ Bắt đầu quét Page trên {len(creds)} tài khoản nguồn...{Colors.RESET}")
+    accounts: List[Dict[str, Any]] = []
+
+    for i, cred in enumerate(creds, 1):
+        token = cred.get("token", "")
+        password = cred.get("pwd", "")
+        uid_file = cred.get("uid", "")
+        px = cred.get("proxy")
+
+        safe_print(f"\n{Colors.BLUE}--- Tài khoản nguồn #{i} (UID: {uid_file or 'Unknown'}) ---{Colors.RESET}")
+
+        if not token and uid_file and password:
+            safe_print(f"  {Colors.YELLOW}Chưa có sẵn Token EAAAAU -> Đang tự động Login Bloks CAA v5...{Colors.RESET}")
+            l_res = login_and_get_token(cred)
+            if l_res.get("success"):
+                token = l_res["token"]
+                safe_print(f"  {Colors.GREEN}✓ Đã lấy được Token EAAAAU mới!{Colors.RESET}")
+            else:
+                safe_print(f"  {Colors.RED}✗ Lỗi Login lấy Token: {l_res.get('message')} -> Bỏ qua.{Colors.RESET}")
                 continue
 
-            pages_res = creator.get_all_pages_with_tokens()
-            pages = pages_res.get("pages", [])
-            safe_print(f"{Colors.CYAN}[{idx}/{len(accs)}] Acc {u_info['uid']} ({u_info['name']}) có {len(pages)} Page.{Colors.RESET}")
+        info = get_id(token, proxy=px)
+        if info is None and uid_file and password:
+            safe_print(f"  {Colors.YELLOW}! Token cũ không verify được -> Thử Login lại bằng mật khẩu...{Colors.RESET}")
+            l_res = login_and_get_token(cred)
+            if l_res.get("success"):
+                token = l_res["token"]
+                info = get_id(token, proxy=px)
 
-            for p in pages:
-                pid = p["id"]
-                pname = p["name"]
-                ptk = p.get("access_token", "")
-                add_id = p.get("additional_profile_id", "")
+        if info is None:
+            if not uid_file:
+                safe_print(f"  {Colors.RED}✗ Token DIE và không có UID -> Bỏ qua.{Colors.RESET}")
+                continue
+            safe_print(f"  {Colors.YELLOW}! Token không verify được qua /me — dùng UID từ dữ liệu: {uid_file}{Colors.RESET}")
+            id_acc = str(uid_file)
+            name_acc = f"(unknown - uid {uid_file})"
+        else:
+            id_acc_api, name_acc = info
+            id_acc = str(uid_file or id_acc_api)
+            safe_print(f"  {Colors.GREEN}✓ Tài khoản: {name_acc} (UID: {id_acc}){Colors.RESET}")
 
-                def step_cb(msg: str):
-                    safe_print(f"   {Colors.YELLOW}[*] {msg}{Colors.RESET}")
+        safe_print("  Đang lấy tất cả Page (Graph API v24.0 + ProfileSwitcherQuery)...")
+        all_pages = get_all_pages(token, id_acc, proxy=px)
+        if not all_pages:
+            safe_print(f"  {Colors.YELLOW}! Tài khoản UID {id_acc} không có Page nào. Bỏ qua.{Colors.RESET}")
+            continue
 
-                res = creator.invite_holder_mtool(
-                    page_id=pid,
-                    page_token=ptk,
-                    password=pwd,
-                    holder_uid=target["uid"],
-                    holder_token=target["token"],
-                    holder_proxy=target["proxy"],
-                    additional_profile_id=add_id,
-                    step_callback=step_cb
-                )
-                c_out = Colors.GREEN if res.get("success") else Colors.RED
-                safe_print(f"   {c_out}=> Page '{pname}' ({pid}): {res.get('message')}{Colors.RESET}")
-                with open("output_chuyen_page.txt", "a", encoding="utf-8") as f:
-                    f.write(f"{u_info['uid']}|{pid}|{pname}|{target['uid']}|{res.get('status')}|{res.get('message')}\n")
+        safe_print(f"  {Colors.GREEN}→ Tìm thấy {len(all_pages)} Page. Sẽ chuyển TẤT CẢ {len(all_pages)} Page.{Colors.RESET}")
+        accounts.append({
+            "index": i,
+            "id": id_acc,
+            "name": name_acc,
+            "token": token,
+            "password": password,
+            "proxy": px,
+            "pages": all_pages
+        })
 
-        safe_print(f"\n{Colors.GREEN}Hoàn tất! Đã lưu kết quả tại output_chuyen_page.txt{Colors.RESET}")
-        input("\nNhấn Enter để quay lại menu chính...")
-        return
+    return accounts
 
-    # Mode 2: Nhập từng Page cụ thể
-    page_id = input("- ID Page (profile_id): ").strip()
-    sender_token = input("- Token Acc cầm Page (EAAAAU...): ").strip()
-    password = input("- Mật khẩu Acc cầm Page: ").strip()
-    target_uid = input("- UID Acc nhận Page (Nick Mẹ): ").strip()
-    receiver_token = input("- Token Acc nhận Page (Enter nếu chỉ bắn lời mời, không Auto Accept): ").strip()
-    sender_proxy = input("- Proxy Acc cầm Page (Enter nếu không dùng): ").strip()
-    receiver_proxy = input("- Proxy Acc nhận Page (Enter nếu không dùng): ").strip()
 
-    if not (page_id and sender_token and target_uid):
-        safe_print(f"{Colors.RED}[!] Thiếu thông tin bắt buộc.{Colors.RESET}")
+def run_standalone_super_transfer_menu():
+    print_banner()
+    safe_print(f"{Colors.GREEN}{Colors.BOLD}=== [2] CÔNG CỤ CHUYỂN QUYỀN QUẢN TRỊ PAGE SIÊU MẠNH (FULL 4 BƯỚC NT_BUNDLE_TREE) ==={Colors.RESET}\n")
+
+    # ===== BƯỚC 1: NHẬP TÀI KHOẢN NHẬN PAGE =====
+    safe_print(f"{Colors.BLUE}===== BƯỚC 1: TÀI KHOẢN NHẬN PAGE (NICK MẸ) ====={Colors.RESET}")
+    token_nhan = ""
+    id_acc_nhan = ""
+    name_acc_nhan = ""
+
+    while True:
+        raw_nhan = input("Nhập Token (hoặc UID|Pass|Cookie|Token) của tài khoản nhận Page: ").strip()
+        if not raw_nhan:
+            safe_print("Token nhận không được để trống.")
+            continue
+
+        parsed_nhan = parse_universal_line(raw_nhan)
+        token_nhan = parsed_nhan["token"] if parsed_nhan and parsed_nhan.get("token") else raw_nhan
+        if not token_nhan.startswith("EAAAA") and parsed_nhan and parsed_nhan.get("uid") and parsed_nhan.get("pwd"):
+            l_res = login_and_get_token(parsed_nhan)
+            if l_res.get("success"):
+                token_nhan = l_res["token"]
+
+        info_nhan = get_id(token_nhan)
+        if info_nhan is None:
+            safe_print(f"{Colors.RED}✗ Token không hợp lệ hoặc không lấy được thông tin tài khoản nhận. Vui lòng nhập lại.{Colors.RESET}")
+            continue
+
+        id_acc_nhan, name_acc_nhan = info_nhan
+        safe_print(f"{Colors.GREEN}✓ Tài khoản đích: {name_acc_nhan} (ID: {id_acc_nhan}){Colors.RESET}")
+        break
+
+    logger.info("Đang kiểm tra danh sách Page mà tài khoản đích đang quản lý...")
+    target_page_ids = get_managed_page_ids(token_nhan)
+    if target_page_ids:
+        safe_print(f"{Colors.GREEN}✓ Tài khoản đích đang quản lý {len(target_page_ids)} Page (Sẽ tự động bỏ qua các Page đã có quyền).{Colors.RESET}")
+    else:
+        safe_print(f"{Colors.YELLOW}! Tài khoản đích hiện chưa quản lý Page nào (hoặc không bỏ qua Page nào).{Colors.RESET}")
+
+    # ===== BƯỚC 2: THIẾT LẬP CÁC TÀI KHOẢN NGUỒN =====
+    safe_print(f"\n{Colors.BLUE}===== BƯỚC 2: THIẾT LẬP TÀI KHOẢN NGUỒN (ACC CẦM PAGE) ====={Colors.RESET}")
+    safe_print("Chọn phương thức nhập tài khoản nguồn:")
+    safe_print(f"  {Colors.YELLOW}[1]{Colors.RESET} Nhập thủ công từng Acc/Token & tự chọn Page (1-5, 1,3,5, all)")
+    safe_print(f"  {Colors.YELLOW}[2]{Colors.RESET} Dán trực tiếp nhiều dòng (UID|Pass|Cookie|Token, UID|Pass|Token...) — tự chuyển TẤT CẢ Page")
+    safe_print(f"  {Colors.YELLOW}[3]{Colors.RESET} Đọc từ file (hỗ trợ mọi định dạng uid|pass|token / acc_cam_page.txt) — tự chuyển TẤT CẢ Page")
+
+    while True:
+        mode = input("Lựa chọn (1/2/3, mặc định 2): ").strip() or "2"
+        if mode in ("1", "2", "3"):
+            break
+        safe_print("Vui lòng nhập 1, 2 hoặc 3.")
+
+    source_accounts: List[Dict[str, Any]] = []
+
+    if mode == "2":
+        raw_lines = input_multiline("Dán danh sách tài khoản nguồn vào đây:")
+        source_accounts = setup_source_from_universal_lines(raw_lines)
+    elif mode == "3":
+        while True:
+            filepath = input("Nhập đường dẫn file tài khoản nguồn (mặc định acc_cam_page.txt): ").strip().strip('"').strip("'") or "acc_cam_page.txt"
+            if not os.path.isfile(filepath):
+                safe_print(f"{Colors.RED}✗ File không tồn tại: {filepath}{Colors.RESET}")
+                continue
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                raw_lines = [ln.strip() for ln in f if ln.strip() and not ln.strip().startswith("#")]
+            source_accounts = setup_source_from_universal_lines(raw_lines)
+            if source_accounts:
+                break
+            retry_f = input("Không đọc được tài khoản nào có Page. Nhập 'q' để quay lại hoặc Enter để chọn file khác: ").strip().lower()
+            if retry_f == "q":
+                return
+    else:
+        safe_print(f"Nhập từng tài khoản nguồn. {Colors.YELLOW}Nhấn Enter (bỏ trống) để kết thúc nhập.{Colors.RESET}")
+        idx = 1
+        while True:
+            acc = setup_source_account_interactive(idx, allow_cancel=True)
+            if acc is None:
+                if idx == 1:
+                    safe_print(f"{Colors.RED}! Cần ít nhất 1 tài khoản nguồn để chuyển.{Colors.RESET}")
+                    input("\nNhấn Enter để quay lại...")
+                    return
+                safe_print(f"\n{Colors.GREEN}✓ Đã nhập xong {len(source_accounts)} tài khoản nguồn.{Colors.RESET}")
+                break
+            source_accounts.append(acc)
+            safe_print(f"{Colors.GREEN}✓ Đã thiết lập tài khoản nguồn {idx}: {acc['name']} với {len(acc['pages'])} Page.{Colors.RESET}")
+            idx += 1
+
+    if not source_accounts:
+        safe_print(f"{Colors.RED}! Không có tài khoản nguồn nào có Page để xử lý.{Colors.RESET}")
         input("\nNhấn Enter để quay lại...")
         return
 
-    manager = FacebookAdminManager(sender_proxy=sender_proxy or None, receiver_proxy=receiver_proxy or None)
-    res = manager.transfer_page(
-        page_id=page_id,
-        sender_token=sender_token,
-        password=password,
-        target_uid=target_uid,
-        receiver_token=receiver_token or None,
-        auto_accept=bool(receiver_token),
-        step_callback=lambda m: safe_print(f"  {Colors.YELLOW}[*] {m}{Colors.RESET}")
-    )
-    c_out = Colors.GREEN if res.get("success") else Colors.RED
-    safe_print(f"\n{c_out}=> Kết quả: {res.get('status')} | {res.get('message')}{Colors.RESET}")
+    # Kiểm tra nếu có tài khoản nguồn nào thiếu mật khẩu
+    missing_pwd = any(not a.get("password") for a in source_accounts)
+    if missing_pwd:
+        default_mk = input(f"\n{Colors.YELLOW}Phát hiện có Acc nguồn chưa kèm mật khẩu. Nhập mật khẩu chung cho các Acc đó: {Colors.RESET}").strip()
+        for a in source_accounts:
+            if not a.get("password"):
+                a["password"] = default_mk
+
+    # ===== BƯỚC 3: NHẬP DELAY =====
+    while True:
+        delay_str = input("\nNhập số giây delay giữa các lần chuyển Page (mặc định 2, nhập 0 để không delay): ").strip() or "2"
+        try:
+            delay = float(delay_str)
+            if delay >= 0:
+                break
+        except ValueError:
+            pass
+        safe_print("Vui lòng nhập số >= 0.")
+
+    # ===== BƯỚC 4: BẮT ĐẦU CHUYỂN =====
+    total = sum(len(acc["pages"]) for acc in source_accounts)
+    safe_print(f"\n{Colors.GREEN}{Colors.BOLD}===== BẮT ĐẦU CHUYỂN {total} PAGE TỪ {len(source_accounts)} TÀI KHOẢN NGUỒN ====={Colors.RESET}")
+
+    success_count = 0
+    fail_count = 0
+    skip_count = 0
+    processed = 0
+
+    for acc in source_accounts:
+        id_acc_src = acc["id"]
+        name_acc_src = acc["name"]
+        mk = acc["password"]
+        src_token = acc.get("token", "")
+        src_proxy = acc.get("proxy")
+
+        safe_print(f"\n{Colors.CYAN}--- Tài khoản nguồn: {name_acc_src} (UID: {id_acc_src}) ---{Colors.RESET}")
+
+        for page in acc["pages"]:
+            processed += 1
+            page_uid = page["page_uid"]
+            page_token = page["page_token"]
+            page_name = page["page_name"]
+            page_id = page["page_id"]
+
+            safe_print(f"\n[{processed}/{total}] Đang xử lý: {Colors.BOLD}{page_name}{Colors.RESET} (Page ID: {page_id} | Profile UID: {page_uid})")
+            logger.info(f"===== [{processed}/{total}] Xử lý Page: {page_name} (ID: {page_id}) từ nguồn {name_acc_src} =====")
+
+            if page_id in target_page_ids or page_uid in target_page_ids:
+                msg = f"⏭️  Page {page_name}: Tài khoản đích đã có quyền quản trị, bỏ qua."
+                safe_print(f"{Colors.YELLOW}{msg}{Colors.RESET}")
+                logger.info(msg)
+                skip_count += 1
+                if processed < total:
+                    sleep_with_countdown(delay)
+                continue
+
+            tr_res = execute_super_transfer(
+                page_uid=page_uid,
+                page_id=page_id,
+                page_token=page_token,
+                sender_token=src_token,
+                password=mk,
+                target_uid=id_acc_nhan,
+                receiver_token=token_nhan,
+                sender_proxy=src_proxy,
+                step_callback=lambda m: safe_print(f"  {Colors.CYAN}→ {m}{Colors.RESET}")
+            )
+
+            now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if tr_res.get("status") == "SUCCESS":
+                msg = f"✅ Page {page_name}: Chuyển quyền & Auto Accept thành công!"
+                safe_print(f"{Colors.GREEN}{Colors.BOLD}{msg}{Colors.RESET}")
+                logger.info(msg)
+                success_count += 1
+                target_page_ids.add(page_id)
+                target_page_ids.add(page_uid)
+                with open("output_chuyen_page.txt", "a", encoding="utf-8") as f:
+                    f.write(f"{now_str}|SUCCESS|{page_id}|{page_uid}|{page_name}|From:{id_acc_src}|To:{id_acc_nhan}\n")
+            elif tr_res.get("status") == "INVITED_ONLY":
+                msg = f"⚠️ Page {page_name}: {tr_res.get('message')}"
+                safe_print(f"{Colors.YELLOW}{msg}{Colors.RESET}")
+                logger.warning(msg)
+                fail_count += 1
+                with open("output_chuyen_page.txt", "a", encoding="utf-8") as f:
+                    f.write(f"{now_str}|INVITED_ONLY|{page_id}|{page_uid}|{page_name}|From:{id_acc_src}|To:{id_acc_nhan}|{tr_res.get('message')}\n")
+            else:
+                msg = f"❌ Page {page_name}: {tr_res.get('message')}"
+                safe_print(f"{Colors.RED}{msg}{Colors.RESET}")
+                logger.error(msg)
+                fail_count += 1
+
+            if processed < total:
+                sleep_with_countdown(delay)
+
+    safe_print(f"\n{Colors.GREEN}{Colors.BOLD}===== KẾT QUẢ TỔNG KẾT ====={Colors.RESET}")
+    safe_print(f"- Tổng số tài khoản nguồn: {len(source_accounts)}")
+    safe_print(f"- Thành công (Full Admin): {Colors.GREEN}{success_count} Page{Colors.RESET}")
+    safe_print(f"- Thất bại / Chưa nhận:    {Colors.RED}{fail_count} Page{Colors.RESET}")
+    safe_print(f"- Bỏ qua (đã có quyền):    {Colors.YELLOW}{skip_count} Page{Colors.RESET}")
+    safe_print(f"- File kết quả:            {Colors.CYAN}output_chuyen_page.txt{Colors.RESET}")
+    safe_print(f"- File log chi tiết:       {Colors.CYAN}transfer_page.log{Colors.RESET}")
     input("\nNhấn Enter để quay lại menu chính...")
 
 
@@ -2683,11 +3189,11 @@ def run_get_token_menu():
     for t in worker_threads:
         t.join()
 
-    safe_print("\n" + "=" * 98)
+    safe_print("\n" + "=" * 100)
     safe_print(f"{Colors.GREEN}{Colors.BOLD} HOÀN TẤT LẤY TOKEN EAAAAU!{Colors.RESET}")
     safe_print(f"- Thành công: {Colors.GREEN}{stats['success']}{Colors.RESET} | Thất bại: {Colors.RED}{stats['fail']}{Colors.RESET}")
     safe_print(f"- File lưu (UID|Pass|Cookie|Token): {Colors.CYAN}tokens_eaaau.txt{Colors.RESET}")
-    safe_print("=" * 98 + "\n")
+    safe_print("=" * 100 + "\n")
     input("Nhấn Enter để quay lại menu chính...")
 
 
@@ -2695,8 +3201,8 @@ def main():
     while True:
         print_banner()
         safe_print(f"{Colors.BOLD}VUI LÒNG CHỌN CHỨC NĂNG:{Colors.RESET}")
-        safe_print(f"{Colors.GREEN}[1] REG PAGE PRO5 VIP (CORE V5) -> CHECK LIVE -> CHUYỂN PAGE & AUTO ACCEPT (MTOOL){Colors.RESET}")
-        safe_print(f"{Colors.CYAN}[2] QUÉT PAGE CŨ TRONG ACC & CHUYỂN PAGE HÀNG LOẠT SANG NICK MẸ (MTOOL 4 BƯỚC){Colors.RESET}")
+        safe_print(f"{Colors.GREEN}[1] REG PAGE PRO5 VIP (CORE V5) -> CHECK LIVE -> CHUYỂN PAGE SIÊU MẠNH (NT_BUNDLE_TREE){Colors.RESET}")
+        safe_print(f"{Colors.CYAN}[2] CHUYỂN QUYỀN QUẢN TRỊ PAGE SIÊU MẠNH ĐỘC LẬP (CHỌN PAGE 1-5, ALL / ĐỌC FILE){Colors.RESET}")
         safe_print(f"{Colors.YELLOW}[3] GET TOKEN EAAAAU TỪ UID|PASS|COOKIE / 2FA (BLOKS CAA V5){Colors.RESET}")
         safe_print(f"{Colors.RED}[0] THOÁT TOOL{Colors.RESET}\n")
 
@@ -2705,7 +3211,7 @@ def main():
         if choice == "1":
             run_reg_page_menu()
         elif choice == "2":
-            run_standalone_mtool_transfer_menu()
+            run_standalone_super_transfer_menu()
         elif choice == "3":
             run_get_token_menu()
         elif choice == "0":
