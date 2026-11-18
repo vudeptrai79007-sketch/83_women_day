@@ -10,6 +10,7 @@
 # 6. BƯỚC 5: XÁC THỰC OTP GRAPHQL, KIỂM TRA LIVE/CHECKPOINT 049/282
 # 7. BƯỚC 6: ĐÁ GMAIL GIẢI PHÓNG & TỰ ĐỘNG ĐĂNG KÝ 4 ACC DOLA AI NẾU CÓ COOKIE
 # 8. [NEW] HỖ TRỢ CHẠY BẰNG 4G/WIFI THẬT (DIRECT — KHÔNG PROXY)
+# 9. [NEW] TÍCH HỢP API THUÊ MAIL & HOÀN TIỀN TỰ ĐỘNG MAIL.PSTMMO.CC
 # ==============================================================================
 
 import base64
@@ -1155,9 +1156,7 @@ def pick_otptrust_service_interactive(api_key: str) -> tuple:
         return num, f"Service#{num}", provider
     return _pick_facebook()
 
-# ══════════════════════════════════════════════════════════════════════════
-#                    HẾT PART 1/4
-# ══════════════════════════════════════════════════════════════════════════
+
 # --- PHẦN 2: MODULE FB EMAIL MANAGER (THÊM MAIL ẢO & RE-AUTH ĐÁ GMAIL) ---
 
 class FacebookEmailManagerAPI:
@@ -1920,6 +1919,263 @@ class VietMailClient:
         return None
 
 
+# ==============================================================================
+# PSTMMO.CC — API THUÊ EMAIL NHẬN OTP & HOÀN TIỀN TỰ ĐỘNG
+# ==============================================================================
+PSTMMO_BASE = "https://mail.pstmmo.cc"
+PSTMMO_API_KEY = "pst_10f41a8e89b2c28d96fc999791e3a3f3"
+PSTMMO_DEFAULT_SITE = "facebook.com"
+
+
+def pstmmo_load_config() -> dict:
+    path = _local_config_path("pstmmo_config.json")
+    cfg = {
+        "api_key": PSTMMO_API_KEY,
+        "base_url": PSTMMO_BASE,
+        "domain": "",
+    }
+    try:
+        data = _read_local_config(path)
+        if isinstance(data, dict):
+            if data.get("api_key"):
+                cfg["api_key"] = str(data["api_key"]).strip()
+            if data.get("base_url"):
+                cfg["base_url"] = str(data["base_url"]).strip().rstrip("/")
+            if "domain" in data:
+                cfg["domain"] = str(data.get("domain") or "").strip()
+    except Exception:
+        pass
+    return cfg
+
+
+def pstmmo_save_config(api_key: str = None, domain: str = None, base_url: str = None):
+    cfg = pstmmo_load_config()
+    if api_key is not None and api_key.strip():
+        cfg["api_key"] = api_key.strip()
+    if domain is not None:
+        cfg["domain"] = domain.strip()
+    if base_url is not None and base_url.strip():
+        cfg["base_url"] = base_url.strip().rstrip("/")
+    _save_local_config(_local_config_path("pstmmo_config.json"), cfg)
+
+
+class PSTMMOEmail:
+    """Client tích hợp API https://mail.pstmmo.cc (User, Services, Buy, Check OTP, Cancel/Refund)."""
+
+    def __init__(self, api_key: str = None, base_url: str = None):
+        cfg = pstmmo_load_config()
+        self.api_key = (api_key or cfg.get("api_key") or PSTMMO_API_KEY or "").strip()
+        self.base = (base_url or cfg.get("base_url") or PSTMMO_BASE or "").rstrip("/")
+        if self.base.endswith("/api"):
+            self.base = self.base[:-4]
+
+        self.session = requests.Session()
+        self.session.trust_env = False
+        self.session.proxies = {}
+        self.session.headers.update({
+            "Authorization": f"Bearer {self.api_key}",
+            "X-API-Key": self.api_key,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "RegFB-PSTMMO/1.0",
+        })
+        self.last_order_id = None
+        self.last_order_code = None
+        self.last_email = None
+
+    def get_user_info(self) -> Tuple[bool, dict]:
+        """GET /api/user — Kiểm tra thông tin tài khoản & số dư ví."""
+        try:
+            r = self.session.get(f"{self.base}/api/user", timeout=15)
+            data = r.json()
+            if r.status_code == 200 and data.get("status") == "success":
+                return True, data.get("data") or data
+            return False, data
+        except Exception as e:
+            return False, {"message": str(e)}
+
+    def get_services(self) -> Tuple[bool, list]:
+        """GET /api/services — Lấy danh sách dịch vụ, tồn kho và supported_domains."""
+        try:
+            r = self.session.get(f"{self.base}/api/services", timeout=15)
+            data = r.json()
+            if r.status_code == 200 and data.get("status") == "success":
+                return True, data.get("data") or []
+            return False, []
+        except Exception:
+            return False, []
+
+    def rent(self, site: str = PSTMMO_DEFAULT_SITE, domain: str = "") -> Tuple[bool, Optional[str], Optional[Any], Any]:
+        """
+        GET /{token}/{site}/{domain} hoặc /{token}/{site}
+        Hỗ trợ tự động fallback sang domain ngẫu nhiên nếu domain chỉ định hết hàng (HTTP 503).
+        """
+        site_clean = (site or PSTMMO_DEFAULT_SITE).strip()
+        dom_clean = (domain or "").strip().lstrip("@")
+
+        urls_to_try = []
+        if dom_clean:
+            urls_to_try.append(f"{self.base}/{self.api_key}/{site_clean}/{dom_clean}")
+        urls_to_try.append(f"{self.base}/{self.api_key}/{site_clean}")
+
+        last_err = None
+        for idx, url in enumerate(urls_to_try):
+            try:
+                r = self.session.get(url, timeout=20)
+                try:
+                    data = r.json()
+                except Exception:
+                    data = {"message": (r.text or "")[:200], "code": r.status_code}
+
+                if r.status_code == 200 and data.get("status") == "success":
+                    d = data.get("data") or {}
+                    email_addr = (data.get("email") or d.get("email") or "").strip()
+                    order_id = (
+                        data.get("order_id")
+                        or data.get("id")
+                        or d.get("order_id")
+                        or d.get("id")
+                        or data.get("order_code")
+                        or d.get("order_code")
+                    )
+                    self.last_email = email_addr
+                    self.last_order_id = order_id
+                    self.last_order_code = data.get("order_code") or d.get("order_code")
+                    if email_addr and order_id is not None:
+                        return True, email_addr, order_id, data
+
+                if r.status_code == 503 and idx == 0 and len(urls_to_try) > 1:
+                    AppLogger.warn(f"[PSTMMO] Domain '{dom_clean}' tạm hết hàng (503) -> Tự động lấy domain sẵn hàng khác...")
+                    continue
+                if r.status_code == 402:
+                    return False, None, None, "Hết số dư ví (HTTP 402 Payment Required)"
+                if r.status_code == 401:
+                    return False, None, None, "API Key không hợp lệ (HTTP 401 Unauthorized)"
+
+                last_err = data.get("message") or f"HTTP {r.status_code}: {str(data)[:150]}"
+            except Exception as e:
+                last_err = str(e)
+
+        return False, None, None, last_err
+
+    def check_otp(self, order_id=None) -> Tuple[str, Optional[str], dict]:
+        """
+        GET /{token}/check/{order_id}
+        Trả về tuple: (state, otp_code, raw_dict)
+        state thuộc: 'completed' | 'waiting' | 'expired' | 'error'
+        """
+        oid = order_id if order_id is not None else self.last_order_id
+        if not oid:
+            return "error", None, {"message": "missing order_id"}
+
+        url = f"{self.base}/{self.api_key}/check/{oid}"
+        try:
+            r = self.session.get(url, timeout=15)
+            res = r.json()
+        except Exception as e:
+            return "error", None, {"message": str(e)}
+
+        if not isinstance(res, dict):
+            return "error", None, {}
+
+        d = res.get("data") if isinstance(res.get("data"), dict) else {}
+        status_top = str(res.get("status") or "").lower()
+        status_data = str(d.get("status") or "").lower()
+
+        raw_otp = (
+            res.get("otp")
+            or res.get("otp_code")
+            or d.get("otp")
+            or d.get("otp_code")
+        )
+        if raw_otp and str(raw_otp).strip().lower() not in ("none", "null", ""):
+            otp_str = str(raw_otp).strip()
+            m_digits = re.search(r"\b(\d{5,8})\b", otp_str)
+            return "completed", (m_digits.group(1) if m_digits else otp_str), res
+
+        if status_data == "completed":
+            msg_text = str(d.get("message") or "")
+            m_msg = re.search(r"\b(\d{5,8})\b", msg_text)
+            if m_msg:
+                return "completed", m_msg.group(1), res
+
+        if status_data in ("refunded", "failed", "expired") or status_top in ("refunded", "failed", "expired"):
+            return "expired", None, res
+
+        return "waiting", None, res
+
+    def cancel(self, order_id=None) -> Tuple[bool, str]:
+        """GET /{token}/cancel/{order_id} — Hủy đơn & hoàn tiền 100% vào ví."""
+        oid = order_id if order_id is not None else self.last_order_id
+        if not oid:
+            return False, "Thiếu order_id"
+        url = f"{self.base}/{self.api_key}/cancel/{oid}"
+        try:
+            r = self.session.get(url, timeout=15)
+            data = r.json()
+            if r.status_code == 200 and data.get("status") == "success":
+                d = data.get("data") or {}
+                new_bal = d.get("new_balance_formatted") or d.get("new_balance") or ""
+                msg = data.get("message") or "Đã hủy và hoàn tiền"
+                return True, f"{msg} (Số dư: {new_bal})" if new_bal else msg
+            return False, str(data.get("message") or data)
+        except Exception as e:
+            return False, str(e)
+
+    def wait_otp(
+        self,
+        order_id=None,
+        max_wait: int = 180,
+        poll_every: float = 3.5,
+        resend_callback: Optional[Callable[[], bool]] = None,
+        resend_times: int = 4,
+        resend_interval: float = 15.0,
+        auto_cancel_on_timeout: bool = True,
+    ) -> Optional[str]:
+        oid = order_id if order_id is not None else self.last_order_id
+        if not oid:
+            return None
+
+        start = time.time()
+        resend_done = 0
+        next_resend_at = start + 12.0
+        attempt = 0
+
+        while time.time() - start < max_wait:
+            attempt += 1
+            state, otp, raw = self.check_otp(oid)
+            if state == "completed" and otp:
+                print()
+                return otp
+            if state == "expired":
+                print()
+                AppLogger.warn(f"[PSTMMO] Đơn hàng #{oid} đã hết hạn hoặc đã được hoàn tiền.")
+                return None
+
+            now = time.time()
+            if resend_callback and resend_done < resend_times and now >= next_resend_at:
+                try:
+                    AppLogger.mail(f"[PSTMMO] Gửi lại mã OTP Facebook lần {resend_done + 1}/{resend_times}...")
+                    resend_callback()
+                except Exception as e:
+                    AppLogger.warn(f"[PSTMMO] Lỗi resend OTP: {e}")
+                resend_done += 1
+                next_resend_at = now + resend_interval
+
+            left = int(max_wait - (time.time() - start))
+            d_status = ((raw.get("data") or {}).get("status") if isinstance(raw, dict) else "") or state
+            print(f"    ... Chờ OTP PSTMMO ({attempt}) còn ~{left}s | status={d_status}", end="\r", flush=True)
+            time.sleep(poll_every)
+
+        print()
+        if auto_cancel_on_timeout:
+            ok_c, msg_c = self.cancel(oid)
+            if ok_c:
+                AppLogger.info(f"[PSTMMO] Tự động hủy đơn #{oid} & hoàn tiền: {msg_c}")
+        return None
+# ══════════════════════════════════════════════════════════════════════════
+#                    HẾT PHẦN 1/3
+# ══════════════════════════════════════════════════════════════════════════
 # ==============================================================================
 # GMAIL POOL — mua Gmail94, cache, dot-trick
 # ==============================================================================
@@ -2693,14 +2949,10 @@ class FacebookLogin:
 
 API_KEY_B64 = "QTdGMy05QjJFLTRDOEQtMUY2QS1LOU0y"
 
-# ══════════════════════════════════════════════════════════════════════════
-#                    HẾT PART 2/4
-# ══════════════════════════════════════════════════════════════════════════
 # ==============================================================================
 # DANH SÁCH TÊN MỞ RỘNG (~30 họ + 50 tên nam + 50 tên nữ Việt Nam)
 # + Tên quốc tế / Thái Lan / US Latinh khi IP không phải Việt Nam
 # ==============================================================================
-# ----- HỌ + TÊN VIỆT NAM MỞ RỘNG (~30 họ + 50 tên nam + 50 tên nữ) -----
 SURNAMES_VN = [
     "Nguyễn", "Trần", "Lê", "Phạm", "Hoàng", "Huỳnh", "Phan", "Vũ", "Võ", "Đặng",
     "Bùi", "Đỗ", "Ngô", "Đinh", "Dương", "Lý", "Trương", "Lưu", "Lâm", "Mai",
@@ -2723,7 +2975,6 @@ FEMALE_VN = [
     "Trang", "Trinh", "Trúc", "Tuyết", "Vân", "Vi", "Vy", "Yến", "Ý", "Hân",
 ]
 
-# Danh sách tên quốc tế / Thái Lan / US Latinh khi IP không phải Việt Nam
 INTL_FIRST_NAMES_MALE = ["Somchai", "Arthit", "Kittisak", "Thanawat", "Chaiwat", "Alex", "David", "John", "Michael", "James"]
 INTL_FIRST_NAMES_FEMALE = ["Sunisa", "Pornthip", "Kanya", "Siriporn", "Apinya", "Emma", "Sarah", "Emily", "Jessica", "Sophia"]
 INTL_LAST_NAMES = ["Prasert", "Suksom", "Wongsuwan", "Rattana", "Thongdee", "Smith", "Johnson", "Brown", "Miller", "Davis"]
@@ -3526,7 +3777,6 @@ def get_totp_token(secret: str) -> str:
     except Exception:
         pass
     
-    # Fallback thuần Python (RFC 6238) không cần thư viện ngoài
     try:
         missing_padding = len(clean_secret) % 8
         if missing_padding:
@@ -3838,7 +4088,6 @@ def enable_2fa_katana_graphql(token: str, uid: str, password: str, proxy: Option
     r72 = post_step("FbBloksAppRootQuery-com.bloks.www.fx.settings.security.two_factor.select_method", "10537346116771029123037277298", v72, tags='["surfaces.fb.GraphServiceEmitter","GraphServices"]')
     r72_text = r72.text
 
-    # Trích xuất request_data hoặc machine_id từ r72 nếu có
     req_data_str = json.dumps({
         "account_id": account_id_int,
         "account_type": 0,
@@ -3964,18 +4213,15 @@ def enable_2fa_katana_graphql(token: str, uid: str, password: str, proxy: Option
     r85_text = r85.text
 
     totp_secret = None
-    # 1. Tìm nhóm 4 ký tự Base32
     k_matches = re.findall(r'([A-Z2-7]{4}(?:\s+[A-Z2-7]{4}){7})', r85_text)
     if k_matches:
         totp_secret = re.sub(r'\s+', '', k_matches[0]).upper()
     else:
-        # 2. Tìm chuỗi liền 32 ký tự Base32
         k_32 = re.findall(r'\"([A-Z2-7]{32})\"', r85_text)
         if k_32:
             totp_secret = k_32[0].upper()
 
     if not totp_secret:
-        # Nếu chưa thấy trong Entry 85, gọi tiếp Entry 86 (Màn hình hiển thị Key)
         v86 = {
             "params": {
                 "params": f"{{params:{{\"client_input_params\":{{\"machine_id\":\"{machine_id}\"}},\"server_params\":{{\"machine_id\":\"{machine_id}\",\"account_id\":{account_id_int}}}}}}}",
@@ -4000,7 +4246,6 @@ def enable_2fa_katana_graphql(token: str, uid: str, password: str, proxy: Option
 
     print(f"    [+] Đã lấy được Secret Key 2FA: {totp_secret}")
 
-    # Bước 7: Kích hoạt 2FA TOTP (Entry [91])
     totp_code = generate_totp_code_6(totp_secret)
     print(f"    [2FA Katana] Bước 7/7: Gửi mã TOTP ({totp_code}) xác nhận kích hoạt...")
     enable_inner = {
@@ -4048,17 +4293,14 @@ def auto_enable_2fa(session, browser_profile, uid, password, proxy: Optional[str
     print(f"\n[+] TIẾN TRÌNH UP 2FA TỰ ĐỘNG CHO UID: {uid}")
     print(f"    - User-Agent Katana cố định cho nick: {katana_ua[:85]}...")
     
-    # Tự động nhận diện Proxy từ session nếu không truyền vào
     if not proxy and session and hasattr(session, 'proxies') and session.proxies:
         proxy = session.proxies.get('https') or session.proxies.get('http')
 
-    # Bước 1: Lấy Token EAAAAU bằng đúng katana_ua này
     token = get_account_token_eaaau(session=session, uid=uid, password=password, proxy=proxy, katana_ua=katana_ua)
     if not token:
         print(f"    [-] Không thể lấy Token EAAAAU cho UID {uid} -> Bỏ qua khâu 2FA để bảo toàn tài khoản.")
         return None, None
 
-    # Bước 2: Bật 2FA qua Katana Bloks GraphQL API (dùng ĐÚNG katana_ua này)
     totp_secret = enable_2fa_katana_graphql(token=token, uid=uid, password=password, proxy=proxy, katana_ua=katana_ua)
     return totp_secret, token
 
@@ -4067,15 +4309,6 @@ def auto_enable_2fa(session, browser_profile, uid, password, proxy: Optional[str
 # PASSWORD GENERATOR (dạng Abc123#)
 # ==============================================================================
 def generate_strong_password() -> str:
-    """
-    Tạo mật khẩu dạng Abc123# chuẩn Facebook:
-      - 1 chữ HOA ở đầu
-      - 2-3 chữ thường
-      - 2-3 chữ số
-      - 1 ký tự đặc biệt (# @ ! $ % & *)
-    Tổng độ dài: 6-8 ký tự. Random hoàn toàn nên mỗi acc 1 pass khác nhau.
-    LƯU Ý: KHÔNG dùng ':' ';' ',' " ' space để tránh lỗi format #PWD_BROWSER.
-    """
     specials = "#@!$%&*"
 
     upper   = random.choice(string.ascii_uppercase)
@@ -4110,9 +4343,6 @@ FRIENDLY_RESEND = "useCAAConfirmationResendConfCodeMutation"
 DOC_VERIFY = "24050931851170558"
 FRIENDLY_VERIFY = "useCAAFBConfirmationFormSubmitMutation"
 
-# ══════════════════════════════════════════════════════════════════════════
-#                    HẾT PART 3/4
-# ══════════════════════════════════════════════════════════════════════════
 # ==============================================================================
 # NETNIT API — CHECK GMAIL LIVE/DEAD
 # ==============================================================================
@@ -4668,8 +4898,9 @@ class AdvancedAccountRegEngine:
         except Exception as e:
             AppLogger.error(f"[RESEND] Lỗi gửi lại mã OTP: {e}")
         return False
-
-
+# ══════════════════════════════════════════════════════════════════════════
+#                    HẾT PHẦN 2/3
+# ══════════════════════════════════════════════════════════════════════════
 # ==============================================================================
 # GMAIL POOL — DIRECT (4G/WiFi)
 # ==============================================================================
@@ -4961,7 +5192,6 @@ def run_one_account_advanced(target_email: str, email_token: str, proxy_str: Opt
         session.proxies.update({"http": formatted_proxy, "https": formatted_proxy})
         AppLogger.proxy(f"Sử dụng Proxy: {formatted_proxy}")
     else:
-        # ==== MODE 4G/WIFI: DIRECT 100% — không proxy, không trust_env ====
         session.proxies = {}
         session.trust_env = False
         AppLogger.proxy("Chạy 4G/WiFi THẬT (Direct — không proxy)")
@@ -5302,7 +5532,6 @@ def run_one_account_sms(
         session.proxies.update({"http": formatted_proxy, "https": formatted_proxy})
         AppLogger.proxy(f"Sử dụng Proxy: {formatted_proxy}")
     else:
-        # ==== MODE 4G/WIFI: DIRECT 100% ====
         session.proxies = {}
         session.trust_env = False
         AppLogger.proxy("Chạy 4G/WiFi THẬT (Direct — không proxy)")
@@ -5566,7 +5795,6 @@ def run_one_account_otptrust(
         session.proxies.update({"http": formatted_proxy, "https": formatted_proxy})
         AppLogger.proxy(f"Sử dụng Proxy: {formatted_proxy}")
     else:
-        # ==== MODE 4G/WIFI: DIRECT 100% ====
         session.proxies = {}
         session.trust_env = False
         AppLogger.proxy("Chạy 4G/WiFi THẬT (Direct — không proxy)")
@@ -5812,7 +6040,6 @@ def run_one_account_vietmail(
         session.proxies.update({"http": formatted_proxy, "https": formatted_proxy})
         AppLogger.proxy(f"Su dung Proxy: {formatted_proxy}")
     else:
-        # ==== MODE 4G/WIFI: DIRECT 100% ====
         session.proxies = {}
         session.trust_env = False
         AppLogger.proxy("Chay 4G/WiFi THAT (Direct — khong proxy)")
@@ -6066,7 +6293,344 @@ def run_one_account_vietmail(
 
 
 # ==============================================================================
-# BATCH RUNNERS
+# RUN ONE ACCOUNT & BATCH RUNNER — PSTMMO.CC
+# ==============================================================================
+def run_one_account_pstmmo(
+    proxy_str: Optional[str] = None,
+    enable_2fa: bool = False,
+    enable_dola: bool = True,
+    pstmmo_key: str = None,
+    pstmmo_domain: str = "",
+    resend_times: int = 4,
+    thread_idx: Optional[int] = None,
+) -> bool:
+    global active_dola_threads
+
+    mail_client = PSTMMOEmail(api_key=pstmmo_key)
+
+    session = requests.Session()
+    session.verify = False
+    formatted_proxy = None
+    if proxy_str:
+        curr_px = proxy_str.strip()
+        if not curr_px.startswith(("http://", "https://", "socks5://", "socks5h://")):
+            parts = curr_px.split(":")
+            if len(parts) == 4:
+                formatted_proxy = f"http://{parts[2]}:{parts[3]}@{parts[0]}:{parts[1]}"
+            elif len(parts) == 2:
+                formatted_proxy = f"http://{parts[0]}:{parts[1]}"
+            else:
+                formatted_proxy = f"http://{curr_px}"
+        else:
+            formatted_proxy = curr_px
+        if "us.arxlabs.io" in formatted_proxy:
+            sess_rand = uuid.uuid4().hex[:10]
+            if "sessid-" in formatted_proxy:
+                formatted_proxy = re.sub(r"sessid-[a-zA-Z0-9]+", "sessid-" + sess_rand, formatted_proxy)
+            else:
+                formatted_proxy = re.sub(r"(rx9l[a-zA-Z0-9\-]+)", r"\1-sessid-" + sess_rand, formatted_proxy, count=1)
+        session.proxies.update({"http": formatted_proxy, "https": formatted_proxy})
+        AppLogger.proxy(f"Sử dụng Proxy: {formatted_proxy}")
+    else:
+        session.proxies = {}
+        session.trust_env = False
+        AppLogger.proxy("Chạy 4G/WiFi THẬT (Direct — không proxy)")
+
+    browser_profile, screen_info = generate_random_browser_profile(thread_seed=thread_idx)
+    device_label = (
+        f"{browser_profile.get('device_model') or browser_profile.get('platform') or 'Device'} "
+        f"Chrome/{browser_profile.get('chrome_v')} {screen_info.get('wd')}@{screen_info.get('dpr')}"
+    )
+
+    geo_info = detect_proxy_geo(session, proxy_str=proxy_str or "")
+    country_cc = geo_info.get("countryCode", "TH")
+    country_locale = geo_info.get("locale", "en_US")
+    session.cookies.set("locale", country_locale, domain=".facebook.com")
+    session.cookies.set("wd", screen_info["wd"], domain=".facebook.com")
+    session.cookies.set("dpr", screen_info["dpr"], domain=".facebook.com")
+
+    engine = AdvancedAccountRegEngine(session, browser_profile, proxy_str=proxy_str)
+    AppLogger.phase_header(1, "CREATE MỒI SĐT (WARMUP + SUBMIT)")
+    if not engine.warmup_and_extract_tokens():
+        AppLogger.error("Warmup Facebook thất bại / proxy nghẽn.")
+        return False
+
+    new_password = generate_strong_password()
+    gender = random.choice(["MALE", "FEMALE"])
+    if country_cc == "VN":
+        first_name = random.choice(MALE_VN) if gender == "MALE" else random.choice(FEMALE_VN)
+        last_name = random.choice(SURNAMES_VN)
+    elif country_cc == "TH":
+        th_male = ["Somchai", "Arthit", "Kittisak", "Thanawat", "Chaiwat", "Anan"]
+        th_female = ["Sunisa", "Pornthip", "Kanya", "Siriporn", "Apinya"]
+        th_last = ["Prasert", "Suksom", "Wongsuwan", "Rattana", "Thongdee"]
+        first_name = random.choice(th_male) if gender == "MALE" else random.choice(th_female)
+        last_name = random.choice(th_last)
+    else:
+        first_name = random.choice(MALE_US) if gender == "MALE" else random.choice(FEMALE_US)
+        last_name = random.choice(SURNAMES_US)
+    dob = (random.randint(1, 28), random.randint(1, 12), random.randint(1990, 2004))
+    gender_code = "1" if gender == "FEMALE" else "2"
+
+    bait_phone = generate_phone_by_country(country_cc)
+    AppLogger.persona_box(
+        country=country_cc,
+        device=device_label.strip(),
+        name=f"{last_name} {first_name} (g={gender_code})",
+        phone=bait_phone,
+        password=new_password,
+        proxy=formatted_proxy or proxy_str,
+    )
+
+    engine.check_field_validation(bait_phone, first_name, last_name)
+    time.sleep(random.uniform(1.0, 2.0))
+
+    ok_reg, created_uid = False, None
+    for attempt in range(1, 3):
+        ok_reg, created_uid = engine.submit_phone_reg(bait_phone, new_password, first_name, last_name, gender, dob)
+        if ok_reg and created_uid:
+            break
+        if attempt < 2:
+            bait_phone = generate_phone_by_country(country_cc)
+            AppLogger.warn(f"SĐT mồi bị từ chối -> đổi số mồi: {bait_phone}")
+            time.sleep(random.uniform(1.5, 2.5))
+
+    if not ok_reg or not created_uid:
+        AppLogger.error("Reg mồi SĐT thất bại.")
+        return False
+
+    AppLogger.success(f"Created UID={created_uid}")
+    time.sleep(random.uniform(3.0, 5.0))
+
+    AppLogger.phase_header(2, "PSTMMO.CC + CHANGE EMAIL")
+    AppLogger.step(4, "Thuê Email PSTMMO", f"site=facebook.com | domain={pstmmo_domain or 'AUTO'}")
+    ok_rent, email_addr, order_id, rent_data = mail_client.rent(site="facebook.com", domain=pstmmo_domain)
+    if not ok_rent or not email_addr:
+        AppLogger.error(f"Thuê email PSTMMO thất bại: {rent_data}")
+        return False
+
+    AppLogger.success(f"Đã thuê Email: {email_addr} | order_id={order_id}")
+
+    AppLogger.step(4, "Gắn Email Chính", f"add_contact_point -> {email_addr}")
+    add_ok = engine.add_contact_point(created_uid, email_addr)
+    if not add_ok:
+        AppLogger.warn("Gắn email lần 1 fail -> chờ 3s thử lại...")
+        time.sleep(3.0)
+        add_ok = engine.add_contact_point(created_uid, email_addr)
+    if not add_ok:
+        AppLogger.error(f"Không gắn được email {email_addr} -> Gọi hủy đơn hoàn tiền 100%...")
+        ok_c, msg_c = mail_client.cancel(order_id)
+        AppLogger.info(f"[PSTMMO Cancel] {msg_c}")
+        return False
+
+    AppLogger.success(f"Đã gắn {email_addr} — bắt đầu chờ OTP...")
+    time.sleep(random.uniform(2.0, 3.5))
+
+    AppLogger.step(5, "Chờ OTP PSTMMO", f"mail={email_addr} | order_id={order_id} | resend x{resend_times}")
+    resend_fn = (lambda: engine.resend_otp(created_uid)) if created_uid else None
+    otp_code = mail_client.wait_otp(
+        order_id=order_id,
+        max_wait=180,
+        poll_every=3.5,
+        resend_callback=resend_fn,
+        resend_times=resend_times,
+        resend_interval=15.0,
+        auto_cancel_on_timeout=True,
+    )
+    if not otp_code:
+        AppLogger.error(f"Hết thời gian chờ OTP từ {email_addr}")
+        return False
+
+    AppLogger.success(f"OTP PSTMMO: {otp_code}")
+    time.sleep(random.uniform(1.0, 2.0))
+
+    if not engine.verify_otp(created_uid, otp_code):
+        AppLogger.error("Verify OTP thất bại.")
+        return False
+
+    is_live = check_account_and_bypass_049(session, browser_profile, created_uid)
+    if not is_live:
+        AppLogger.checkpoint("Checkpoint 282 — acc không live.")
+        return False
+
+    cookie_dict = session.cookies.get_dict()
+    core_keys = ["c_user", "xs", "fr", "datr", "sb"]
+    cookie_parts = [f"{k}={cookie_dict[k]}" for k in core_keys if k in cookie_dict and cookie_dict[k]]
+    ignored = {"wd", "dpr", "locale", "ps_l", "ps_n", "m_pixel_ratio", "vpd"}
+    for k, v in cookie_dict.items():
+        if k not in core_keys and k not in ignored and v:
+            cookie_parts.append(f"{k}={v}")
+    cookie_str = "; ".join(cookie_parts)
+    if not created_uid and cookie_dict.get("c_user"):
+        created_uid = cookie_dict["c_user"]
+
+    final_line = f"{created_uid}|{new_password}|{cookie_str}"
+    AppLogger.live(f"PSTMMO LIVE OK: {created_uid}|{email_addr}")
+
+    totp_secret = None
+    token_eaaau = None
+    if enable_2fa:
+        try:
+            res_2fa = auto_enable_2fa(session, browser_profile, created_uid, new_password)
+            if isinstance(res_2fa, tuple):
+                totp_secret, token_eaaau = res_2fa
+            else:
+                totp_secret, token_eaaau = res_2fa, None
+
+            if totp_secret:
+                AppLogger.success(f"2FA OK: {totp_secret}")
+                line_2fa = f"{created_uid}|{new_password}|{totp_secret}|{cookie_str}|{token_eaaau}" if token_eaaau else f"{created_uid}|{new_password}|{totp_secret}|{cookie_str}"
+                safe_append_account_line(ACCOUNTS_2FA_FILE, line_2fa)
+        except Exception as e:
+            AppLogger.warn(f"2FA lỗi: {e}")
+
+    if totp_secret and token_eaaau:
+        save_line = f"{created_uid}|{new_password}|{totp_secret}|{cookie_str}|{token_eaaau}"
+    elif totp_secret:
+        save_line = f"{created_uid}|{new_password}|{totp_secret}|{cookie_str}"
+    elif token_eaaau:
+        save_line = f"{created_uid}|{new_password}||{cookie_str}|{token_eaaau}"
+    else:
+        save_line = final_line
+
+    if safe_append_account_line(ACCOUNTS_FULL_FILE, save_line):
+        AppLogger.success(f"Đã lưu: {ACCOUNTS_FULL_FILE}")
+    try:
+        save_to_excel(created_uid, new_password, totp_secret or "NO_2FA", email_addr, cookie_str, token_eaaau or "PSTMMO")
+    except Exception:
+        pass
+    try:
+        send_telegram_live(
+            uid=str(created_uid),
+            password=new_password,
+            cookie=cookie_str,
+            email=str(email_addr or ""),
+            mode="PSTMMO",
+            totp=totp_secret or "",
+            eaau_token=token_eaaau or "",
+        )
+    except Exception:
+        pass
+
+    if HAS_REG_DOLA and enable_dola:
+        def background_dola_task(c_str, px_str, u_id):
+            time.sleep(10)
+            try:
+                ok_dola, sid2, dola_cookies, err = reg_dola.register_dola(c_str, proxy=px_str, uid=u_id)
+                if ok_dola and dola_cookies:
+                    reg_dola.save_dola_cookies(reg_dola.format_dola_cookie_string(dola_cookies))
+                    AppLogger.success(f"[Dola] OK UID {u_id}")
+                else:
+                    AppLogger.warn(f"[Dola] Fail UID {u_id}: {err}")
+            except Exception as e:
+                AppLogger.warn(f"[Dola] Exception: {e}")
+        th = threading.Thread(target=background_dola_task, args=(cookie_str, proxy_str, created_uid), daemon=True)
+        active_dola_threads.append(th)
+        th.start()
+
+    return True
+
+
+def main_batch_runner_pstmmo(
+    num_accs: int = 1,
+    proxy_str: Optional[str] = None,
+    enable_2fa: bool = False,
+    enable_dola: bool = True,
+    pstmmo_key: str = None,
+    pstmmo_domain: str = "",
+    resend_times: int = 4,
+    max_workers: int = 1,
+    proxy_file: str = None,
+):
+    global success_count_global, fail_count_global, _stop_flag
+    print_lock = threading.Lock()
+    job_counter = {"n": 0}
+    job_lock = threading.Lock()
+    target_live = max(1, int(num_accs))
+
+    def _plog(msg: str):
+        with print_lock:
+            print(msg, flush=True)
+
+    def _next_job_no():
+        with job_lock:
+            job_counter["n"] += 1
+            return job_counter["n"]
+
+    def _worker(thread_idx, proxy_pool, fallback_proxy):
+        global success_count_global, fail_count_global, _stop_flag
+        ok_local = 0
+        fail_local = 0
+        _plog(f"[L{thread_idx}] sẵn sàng — mục tiêu {target_live} acc LIVE (PSTMMO)")
+        while not _stop_flag:
+            with COUNTER_LOCK:
+                if success_count_global >= target_live:
+                    break
+            job_no = _next_job_no()
+            px = proxy_pool.next() if (proxy_pool and len(proxy_pool) > 0) else fallback_proxy
+            with COUNTER_LOCK:
+                cur_ok = success_count_global
+            _plog(f"[L{thread_idx}] ===== Lần thử #{job_no} | live {cur_ok}/{target_live} | px={px or 'DIRECT'} =====")
+            try:
+                success = run_one_account_pstmmo(
+                    proxy_str=px,
+                    enable_2fa=enable_2fa,
+                    enable_dola=enable_dola,
+                    pstmmo_key=pstmmo_key,
+                    pstmmo_domain=pstmmo_domain,
+                    resend_times=resend_times,
+                    thread_idx=thread_idx,
+                )
+            except Exception as e:
+                success = False
+                _plog(f"[L{thread_idx}] Exception: {e}")
+
+            if success:
+                ok_local += 1
+                with COUNTER_LOCK:
+                    success_count_global += 1
+                    cur_ok = success_count_global
+                    if cur_ok >= target_live:
+                        _stop_flag = True
+                with print_lock:
+                    AppLogger.live_banner(thread_idx, cur_ok, target_live, job_no)
+                if cur_ok >= target_live:
+                    with print_lock:
+                        AppLogger.live_banner(thread_idx, cur_ok, target_live, job_no, extra=f"ĐÃ ĐỦ {target_live} LIVE")
+                    break
+            else:
+                fail_local += 1
+                with COUNTER_LOCK:
+                    fail_count_global += 1
+                _plog(f"[L{thread_idx}] ✗ FAIL thử #{job_no} | live {success_count_global}/{target_live}")
+        _plog(f"[L{thread_idx}] kết thúc: {ok_local} OK / {fail_local} FAIL")
+
+    _stop_flag = False
+    success_count_global = 0
+    fail_count_global = 0
+
+    proxies = load_proxies_from_file(proxy_file) if proxy_file else []
+    proxy_pool = ProxyFilePool(proxies) if proxies else None
+
+    workers = max(1, int(max_workers or 1))
+    print(f"[+] Luồng: {workers} | Mục tiêu LIVE: {target_live} | Domain: {pstmmo_domain or 'Tự chọn (Auto)'}")
+    print("=" * 70)
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = [ex.submit(_worker, i + 1, proxy_pool, proxy_str) for i in range(workers)]
+        for f in as_completed(futs):
+            try:
+                f.result()
+            except Exception as e:
+                print(f"[!] Worker error: {e}")
+
+    print("\n" + "=" * 70)
+    AppLogger.success(f"HOÀN TẤT PSTMMO: LIVE={success_count_global}/{target_live} | FAIL={fail_count_global} | Tổng thử={job_counter['n']}")
+    print("=" * 70)
+
+
+# ==============================================================================
+# BATCH RUNNERS (SMS / OTPTRUST / VIETMAIL / GMAIL)
 # ==============================================================================
 def main_batch_runner_sms(num_accs: int = 1, proxy_str: Optional[str] = None, enable_2fa: bool = False, enable_dola: bool = True, sms_service_id: int = None, sms_api_key: str = None, resend_times: int = 4):
     ok_count = 0
@@ -6397,8 +6961,8 @@ def main_batch_runner(num_gmails: int = 1, proxy_str: Optional[str] = None, enab
 #                             __MAIN__
 # ══════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    AppLogger.banner("🔥 TOOL REG FACEBOOK — GMAIL / SMS / OTPTRUST / VIETMAIL 🔥", C.BOLD + C.BYELLOW)
-    safe_print(color("  ⚡ Moi SDT proxy | SMS | OTPTrust | VietMail | Dola AI", C.BOLD + C.BWHITE))
+    AppLogger.banner("🔥 TOOL REG FACEBOOK — GMAIL / SMS / OTPTRUST / VIETMAIL / PSTMMO 🔥", C.BOLD + C.BYELLOW)
+    safe_print(color("  ⚡ Moi SDT proxy | SMS | OTPTrust | VietMail | PSTMMO | Dola AI", C.BOLD + C.BWHITE))
     safe_print(color("  ⚡ Hỗ trợ cả Proxy Residential và 4G/5G/WiFi thật (DIRECT)", C.BOLD + C.LIME))
     safe_print(color("=" * 78, C.BGREEN))
 
@@ -6418,19 +6982,22 @@ if __name__ == "__main__":
     safe_print(color("  1. Reg Gmail (moi SDT ao / email — logic cu)", C.GRAY))
     safe_print(color("  2. Reg SMS Codetextnow (moi SDT proxy -> xac minh SDT that)", C.GRAY))
     safe_print(color("  3. Reg Email OTPTrust (moi SDT proxy -> email thue)", C.GRAY))
-    safe_print(color("  4. Reg Email VietMail (moi SDT proxy -> mail API) <- mac dinh", C.LIME))
+    safe_print(color("  4. Reg Email VietMail (moi SDT proxy -> mail API)", C.GRAY))
     safe_print(color("  5. VietMail Cleaner — chi /tra don mail cu", C.GRAY))
-    mode_input = input(color("[?] Chon (1-5, Enter = 4 VietMail): ", C.BWHITE)).strip()
+    safe_print(color("  6. Reg Email PSTMMO (mail.pstmmo.cc — Auto OTP & Refund) <- mặc định", C.LIME))
+    mode_input = input(color("[?] Chon (1-6, Enter = 6 PSTMMO): ", C.BWHITE)).strip()
     if mode_input == "1":
         reg_mode = "gmail"
     elif mode_input == "2":
         reg_mode = "sms"
     elif mode_input == "3":
         reg_mode = "otptrust"
+    elif mode_input == "4":
+        reg_mode = "vietmail"
     elif mode_input == "5":
         reg_mode = "vietmail_clean"
     else:
-        reg_mode = "vietmail"
+        reg_mode = "pstmmo"
 
     enable_2fa_choice = input("\n[?] Bật 2FA API? (y/n, mặc định: n): ").strip().lower()
     enable_2fa_flag = enable_2fa_choice in ("y", "yes", "1", "ok")
@@ -6674,6 +7241,110 @@ if __name__ == "__main__":
             enable_dola=enable_dola_flag,
             vietmail_key=vk,
             vietmail_base=vb,
+            resend_times=resend_times,
+            max_workers=max_workers,
+            proxy_file=px_file,
+        )
+
+    elif reg_mode == "pstmmo":
+        print("\n" + color("-" * 72, C.DGRAY))
+        print(color("📧 CHẾ ĐỘ REG EMAIL PSTMMO (https://mail.pstmmo.cc)", C.BGREEN + C.BOLD))
+        _pst_cfg = pstmmo_load_config()
+        _saved_key = _pst_cfg.get("api_key") or PSTMMO_API_KEY
+        _saved_dom = _pst_cfg.get("domain") or ""
+
+        pk = input(f"[?] API Key PSTMMO (Enter = dùng key đã lưu {_saved_key[:14]}...): ").strip() or _saved_key
+        pst_client = PSTMMOEmail(api_key=pk)
+
+        ok_u, u_info = pst_client.get_user_info()
+        if ok_u:
+            bal_fmt = u_info.get("balance_formatted") or u_info.get("balance")
+            uname = u_info.get("username") or u_info.get("email") or "User"
+            AppLogger.success(f"[PSTMMO] Tài khoản: {uname} | Số dư: {bal_fmt}")
+        else:
+            AppLogger.warn(f"[PSTMMO] Không kiểm tra được số dư: {u_info}")
+
+        ok_s, svcs = pst_client.get_services()
+        fb_domains = []
+        if ok_s and isinstance(svcs, list):
+            for s in svcs:
+                if str(s.get("code") or "").lower() == "facebook" or "facebook" in str(s.get("site") or "").lower():
+                    fb_domains = s.get("supported_domains") or []
+                    print(f"[+] Kho Facebook: {s.get('available_quantity', 0)} mail | Giá: {s.get('price_formatted', s.get('price'))}")
+                    if fb_domains:
+                        print(f"[+] Đuôi hỗ trợ: {', '.join(fb_domains)}")
+                    break
+
+        dom_hint = f"Enter = '{_saved_dom or 'AUTO'}', '-' = để hệ thống tự chọn"
+        dom_in = input(f"[?] Chọn đuôi domain (vd: gmx.com, mail.com, gmail.com | {dom_hint}): ").strip()
+        if dom_in == "-":
+            chosen_domain = ""
+        elif dom_in:
+            chosen_domain = dom_in.lstrip("@")
+        else:
+            chosen_domain = _saved_dom
+
+        pstmmo_save_config(api_key=pk, domain=chosen_domain)
+
+        resend_in = input("[?] Số lần resend OTP FB (mặc định 4): ").strip()
+        try:
+            resend_times = int(resend_in) if resend_in else 4
+            if resend_times < 0:
+                resend_times = 4
+        except ValueError:
+            resend_times = 4
+
+        while True:
+            n_in = input("\n[?] Số Acc LIVE cần đạt: ").strip()
+            if not n_in:
+                num_acc = 1
+                break
+            try:
+                num_acc = int(n_in)
+                if num_acc > 0:
+                    break
+            except ValueError:
+                pass
+            print("[-] Nhập số > 0")
+
+        while True:
+            w_in = input("[?] Số luồng song song (Enter=1): ").strip()
+            if not w_in:
+                max_workers = 1
+                break
+            try:
+                max_workers = int(w_in)
+                if max_workers >= 1:
+                    break
+            except ValueError:
+                pass
+            print("[-] Nhập số >= 1")
+
+        if proxy_target is None:
+            px_file = None
+            AppLogger.info("[*] Mode 4G/WiFi: bỏ qua Proxy file.")
+        else:
+            px_file = _choose_proxy_file()
+
+        print("\n" + color("=" * 72, C.BGREEN))
+        print("📊 CẤU HÌNH PSTMMO REG:")
+        print(f"   • Mode:       MỒI SĐT -> EMAIL PSTMMO (mail.pstmmo.cc)")
+        print(f"   • Domain:     {chosen_domain or 'Tự chọn sẵn hàng (Auto)'}")
+        print(f"   • Resend:     {resend_times} lần")
+        print(f"   • Luồng:      {max_workers} | Mục tiêu LIVE: {num_acc}")
+        print(f"   • Mạng:       {network_mode_label}")
+        print(f"   • Proxy file: {px_file or 'Không'}")
+        print(f"   • 2FA:        {'BẬT' if enable_2fa_flag else 'TẮT'}")
+        print(f"   • Dola AI:    {'BẬT' if enable_dola_flag else 'TẮT'}")
+        print(color("=" * 72, C.BGREEN))
+
+        main_batch_runner_pstmmo(
+            num_accs=num_acc,
+            proxy_str=proxy_target,
+            enable_2fa=enable_2fa_flag,
+            enable_dola=enable_dola_flag,
+            pstmmo_key=pk,
+            pstmmo_domain=chosen_domain,
             resend_times=resend_times,
             max_workers=max_workers,
             proxy_file=px_file,
