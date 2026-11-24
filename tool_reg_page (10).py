@@ -2,15 +2,13 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-TOOL REG PAGE PRO5 VIP (CORE V5) + CHUYỂN PAGE SIÊU MẠNH (BẢN TÍCH HỢP GUI)
-- Đầu vào đa năng: Nhận mọi biến thể (UID|Pass|Cookie|Token, UID|Pass|Token,
-  UID|Pass|Cookie, UID|Pass|2FA, Token|Proxy...).
-- Tự động Login Bloks CAA v5 lấy Token EAAAAU nếu dòng acc chưa có sẵn Token.
-- Luồng cuốn chiếu thông minh:
-    Tạo xong Page nào -> Đợi Check Live Page đó -> Đồng bộ ProfileUID (615...)
-    & sw_token từ ProfileSwitcherQuery -> Up Cover & Up Avatar 2 bước chuẩn Pro5
-    -> Chuyển luôn sang Nick Mẹ (Full 4 Bước nt_bundle_tree & Auto Accept)!
-- Giao diện điều khiển CustomTkinter Dark Mode 3 Tab (1 file duy nhất).
+TOOL REG PAGE PRO5 VIP (CORE V5) + CHUYỂN PAGE SIÊU MẠNH (BẢN HOÀN CHỈNH GUI)
+- Giữ nguyên 100% lõi Reg Page Pro5, Login Bloks CAA v5, Up Ảnh/Zip, Chuyển 4 bước.
+- Bảng điều khiển CustomTkinter Dark Mode 3 Tab:
+    + Tab 1: Reg Page cuốn chiếu + Dừng khẩn cấp + Sang Acc khác.
+    + Tab 2: Quét Page + Chọn nhanh STT (1-5, 1-20, 1,2,5,6, all) + Nhiều UID/Token nhận.
+    + Tab 3: Get Token EAAAAU đa luồng + Copy nhanh.
+- Tự động lưu và nạp cấu hình qua file config.json cạnh tool.
 ================================================================================
 """
 
@@ -399,6 +397,35 @@ def parse_holder_target(raw_input: str) -> List[Dict[str, Optional[str]]]:
                 targets.append({"uid": uid or "", "token": token, "proxy": proxy})
 
     return targets
+
+
+def parse_target_lines_flexible(raw_text: str) -> List[Dict[str, Optional[str]]]:
+    """
+    Hỗ trợ danh sách nhiều Nick Nhận theo mọi định dạng:
+    - Chỉ UID: 61595794700184
+    - UID|Token hoặc UID Token (cách nhau bằng dấu cách hoặc |)
+    - Chỉ Token: EAAAAU...
+    - Dòng full: UID|Pass|Cookie|Token|Proxy
+    """
+    results: List[Dict[str, Optional[str]]] = []
+    seen = set()
+    for line in raw_text.splitlines():
+        ln = line.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        if "|" not in ln and "c_user=" not in ln and re.search(r"\s+", ln):
+            tokens = re.split(r"\s+", ln)
+            ln_norm = "|".join(t for t in tokens if t)
+        else:
+            ln_norm = ln
+
+        parsed_list = parse_holder_target(ln_norm)
+        for t in parsed_list:
+            key = (t.get("uid") or "") + "|" + (t.get("token") or "")
+            if key != "|" and key not in seen:
+                seen.add(key)
+                results.append(t)
+    return results
 
 
 # ==============================================================================
@@ -1614,7 +1641,6 @@ def execute_super_transfer(
     return res_out
 
 
-# === HẾT PHẦN 1/2 — DÁN PHẦN 2/2 NGAY BÊN DƯỚI DÒNG NÀY ===
 # ==============================================================================
 # 6. CÁC HÀM HỖ TRỢ CHỌN PAGE & LÕI REG PAGE PRO5 VIP V5 (TỰ BÓC FILE ẢNH / ZIP)
 # ==============================================================================
@@ -1993,18 +2019,10 @@ class FbPageCreator:
         }
 
     def _get_image_from_local_repo(self, media_type: str = "avatar", custom_path: str = "") -> Tuple[Optional[bytes], str]:
-        """
-        Tự động nhận diện và bóc tách ảnh từ mọi loại file người dùng đưa vào:
-        1. File nén (.zip): Tự động đọc ngầm bên trong file .zip và bốc ngẫu nhiên 1 ảnh (không cần giải nén).
-        2. File ảnh đơn (.jpg, .jpeg, .png, .webp): Tự lấy ảnh đó và biến đổi mã MD5 mỗi lần up.
-        3. File văn bản (.txt): Tự bóc tách các link ảnh (http/https) hoặc đường dẫn ảnh bên trong.
-        4. Không truyền gì: Tự động quét ngay thư mục chứa file code (.py), thư mục 'avatars', 'covers'
-           để tìm bất kỳ file .zip hoặc file ảnh nào đang có sẵn và lấy ra dùng luôn.
-        """
         import zipfile
 
         valid_img_exts = (".jpg", ".jpeg", ".png", ".webp")
-        base_dir = os.path.dirname(os.path.abspath(__file__))
+        base_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
 
         clean_path = (custom_path or "").strip().strip('"').strip("'")
         if clean_path.startswith("& "):
@@ -2058,7 +2076,6 @@ class FbPageCreator:
                 return None, f"Lỗi đọc file txt: {e}"
             return None, "Không lấy được ảnh từ file txt"
 
-        # --- TRƯỜNG HỢP 1: NGƯỜI DÙNG CHỈ ĐỊNH TRỰC TIẾP 1 FILE (ẢNH / ZIP / TXT) ---
         if clean_path and os.path.isfile(clean_path):
             low_p = clean_path.lower()
             if low_p.endswith(".zip"):
@@ -2072,7 +2089,6 @@ class FbPageCreator:
                 except Exception as e:
                     return None, f"Lỗi đọc file ảnh: {e}"
 
-        # --- TRƯỜNG HỢP 2: TỰ ĐỘNG QUÉT TRONG THƯ MỤC CHỨA TOOL & THƯ MỤC CON ---
         avt_dir = os.path.join(base_dir, "avatars")
         cov_dir = os.path.join(base_dir, "covers")
         os.makedirs(avt_dir, exist_ok=True)
@@ -2132,9 +2148,6 @@ class FbPageCreator:
         graph_token: str = "",
         custom_path: str = ""
     ) -> Dict[str, Any]:
-        """
-        Tự động bóc ảnh từ file của người dùng -> Đổi MD5 -> Đóng dấu vào Avatar/Cover Page Pro5.
-        """
         img_bytes, img_info = self._get_image_from_local_repo(media_type=media_type, custom_path=custom_path)
         if not img_bytes:
             return {"success": False, "message": img_info}
@@ -2144,7 +2157,6 @@ class FbPageCreator:
         target_prof_uid = str(profile_uid or page_id)
 
         try:
-            # --- 1. UP ẢNH BÌA (COVER) ---
             if media_type == "cover":
                 for tk_try in [sw_tk, g_tk]:
                     if not tk_try:
@@ -2165,7 +2177,6 @@ class FbPageCreator:
                             return {"success": True, "file": img_info}
                 return {"success": False, "message": "Lỗi gắn ảnh bìa"}
 
-            # --- 2. UP AVATAR PRO5 ---
             avatar_locked = False
             photo_id = None
             last_err = ""
@@ -2279,8 +2290,9 @@ class FbPageCreator:
             return {"success": False, "message": str(e)[:60]}
 
 
+# === HẾT PHẦN 1/2 — DÁN PHẦN 2/2 NGAY BÊN DƯỚI DÒNG NÀY ===
 # ==============================================================================
-# 7. ĐỐI TƯỢNG ACCOUNT TASK & LUỒNG XỬ LÝ CUỐN CHIẾU TỪNG PAGE
+# 7. ĐỐI TƯỢNG ACCOUNT TASK & LUỒNG CUỐN CHIẾU (DỪNG KHẨN CẤP & SANG ACC KHÁC)
 # ==============================================================================
 
 class AccountTask:
@@ -2320,6 +2332,42 @@ class AccountTask:
         self.status = "ready"
         self.current_action = "Chờ đến lượt..."
         self.last_result = ""
+        self.skip_event = threading.Event()
+
+
+def _check_interrupted(acc: AccountTask, stop_event: Optional[threading.Event]) -> Optional[str]:
+    if stop_event is not None and stop_event.is_set():
+        return "stop"
+    if acc.skip_event.is_set():
+        return "skip"
+    return None
+
+
+def _interruptible_countdown(
+    seconds: int,
+    acc: AccountTask,
+    stop_event: Optional[threading.Event],
+    action_builder
+) -> Optional[str]:
+    """Đếm ngược từng giây nhưng kiểm tra dừng khẩn cấp / bỏ qua acc mỗi 0.2s."""
+    for rem in range(seconds, 0, -1):
+        acc.current_action = action_builder(rem)
+        for _ in range(5):
+            reason = _check_interrupted(acc, stop_event)
+            if reason:
+                return reason
+            time.sleep(0.2)
+    return _check_interrupted(acc, stop_event)
+
+
+def _handle_interrupt_exit(acc: AccountTask, reason: str):
+    acc.status = "limit"
+    if reason == "skip":
+        acc.current_action = f"⏭ Đã bỏ qua (Đã giữ {acc.pages_created} Page) -> Sang Acc kế tiếp"
+        add_process_log(acc.acc_id, acc.mother_uid, f"{Colors.YELLOW}⏭ Đã bỏ qua Acc #{acc.acc_id} -> Chuyển sang Acc tiếp theo!{Colors.RESET}")
+    else:
+        acc.current_action = f"🛑 Đã dừng khẩn cấp (Đã giữ {acc.pages_created} Page)"
+        add_process_log(acc.acc_id, acc.mother_uid, f"{Colors.RED}🛑 Đã dừng khẩn cấp Acc #{acc.acc_id}.{Colors.RESET}")
 
 
 def process_single_account_workflow(
@@ -2329,8 +2377,14 @@ def process_single_account_workflow(
     custom_names: Optional[List[str]],
     verify_delay: int,
     delay_between_pages: int,
-    stats: Dict[str, int]
+    stats: Dict[str, int],
+    stop_event: Optional[threading.Event] = None
 ):
+    reason = _check_interrupted(acc, stop_event)
+    if reason:
+        _handle_interrupt_exit(acc, reason)
+        return
+
     acc.status = "running"
 
     if not acc.token:
@@ -2358,6 +2412,11 @@ def process_single_account_workflow(
 
         acc.token = login_res["token"]
         add_process_log(acc.acc_id, acc.pre_uid, f"{Colors.GREEN}✔ Đã lấy thành công Token EAAAAU ({acc.token[:15]}...){Colors.RESET}")
+
+    reason = _check_interrupted(acc, stop_event)
+    if reason:
+        _handle_interrupt_exit(acc, reason)
+        return
 
     acc.creator = FbPageCreator(
         token=acc.token,
@@ -2440,6 +2499,11 @@ def process_single_account_workflow(
             f"{Colors.CYAN}🔄 Đang chuyển {len(existing_old_pages)} Page cũ có sẵn trên Acc sang Nick Mẹ...{Colors.RESET}"
         )
         for old_idx, old_p in enumerate(existing_old_pages, 1):
+            reason = _check_interrupted(acc, stop_event)
+            if reason:
+                _handle_interrupt_exit(acc, reason)
+                return
+
             p_id = str(old_p.get("id", ""))
             p_name = str(old_p.get("name", ""))
             p_token = str(old_p.get("access_token", ""))
@@ -2487,6 +2551,11 @@ def process_single_account_workflow(
                     f_holder.write(f"{acc.mother_uid}|{acc.password}|{acc.token}|{p_id}|{p_uid}|{p_name}|{p_token}|{tr_tag}|{now_str}\n")
 
     for idx in range(1, acc.target_pages + 1):
+        reason = _check_interrupted(acc, stop_event)
+        if reason:
+            _handle_interrupt_exit(acc, reason)
+            return
+
         acc.status = "running"
         page_name = get_page_name(name_type, custom_names)
 
@@ -2539,9 +2608,13 @@ def process_single_account_workflow(
                 break
 
             if idx < acc.target_pages and delay_between_pages > 0:
-                for s_rem in range(delay_between_pages, 0, -1):
-                    acc.current_action = f"[L{thread_id}] Lần {idx} xịt. Nghỉ {s_rem}s trước khi thử lần {idx + 1}..."
-                    time.sleep(1)
+                reason = _interruptible_countdown(
+                    delay_between_pages, acc, stop_event,
+                    lambda s_rem: f"[L{thread_id}] Lần {idx} xịt. Nghỉ {s_rem}s trước khi thử lần {idx + 1}..."
+                )
+                if reason:
+                    _handle_interrupt_exit(acc, reason)
+                    return
             continue
 
         consecutive_fails = 0
@@ -2567,9 +2640,13 @@ def process_single_account_workflow(
             acc.mother_uid,
             f"⏳ [Page {idx}] Đang đợi {wait_seconds}s để FB khởi tạo xong nhân Pro5 & Check Live '{p_name}'..."
         )
-        for rem in range(wait_seconds, 0, -1):
-            acc.current_action = f"[L{thread_id}] [Page {idx}/{acc.target_pages}] Đợi {rem}s để Check Live & Đồng bộ Page {p_id}..."
-            time.sleep(1)
+        reason = _interruptible_countdown(
+            wait_seconds, acc, stop_event,
+            lambda rem: f"[L{thread_id}] [Page {idx}/{acc.target_pages}] Đợi {rem}s để Check Live & Đồng bộ Page {p_id}..."
+        )
+        if reason:
+            _handle_interrupt_exit(acc, reason)
+            return
 
         acc.status = "running"
         acc.current_action = f"[L{thread_id}] [Page {idx}] Đang Check Live Acc & Page '{p_name}'..."
@@ -2608,7 +2685,13 @@ def process_single_account_workflow(
                 f"{Colors.RED}❌ [Page {idx}] Page {p_id} bị DIE/Hủy đăng sau {wait_seconds}s: {page_live_res.get('message')}{Colors.RESET}"
             )
             if idx < acc.target_pages and delay_between_pages > 0:
-                time.sleep(delay_between_pages)
+                reason = _interruptible_countdown(
+                    delay_between_pages, acc, stop_event,
+                    lambda s_rem: f"[L{thread_id}] Page {idx} die. Nghỉ {s_rem}s trước khi Reg Page {idx + 1}..."
+                )
+                if reason:
+                    _handle_interrupt_exit(acc, reason)
+                    return
             continue
 
         add_process_log(
@@ -2616,6 +2699,11 @@ def process_single_account_workflow(
             acc.mother_uid,
             f"{Colors.GREEN}✔ [Page {idx}] Check LIVE OK: Page {p_id} (ProfileUID: {p_uid}) SỐNG!{Colors.RESET}"
         )
+
+        reason = _check_interrupted(acc, stop_event)
+        if reason:
+            _handle_interrupt_exit(acc, reason)
+            return
 
         if acc.auto_buff_media and (p_token or g_token):
             acc.current_action = f"[L{thread_id}] [Page {idx}] Đang bóc ảnh từ kho & Up Ảnh bìa cho '{p_name}'..."
@@ -2703,9 +2791,14 @@ def process_single_account_workflow(
                     f_holder.write(f"{acc.mother_uid}|{acc.password}|{acc.token}|{p_id}|{p_uid}|{p_name}|{p_token}|PAGE_LIVE|{now_str}\n")
 
         if idx < acc.target_pages and delay_between_pages > 0:
-            for s_rem in range(delay_between_pages, 0, -1):
-                acc.current_action = f"[L{thread_id}] Đã xong Page {idx}/{acc.target_pages}! Nghỉ {s_rem}s trước khi Reg Page {idx + 1}..."
-                time.sleep(1)
+            acc.status = "waiting_check"
+            reason = _interruptible_countdown(
+                delay_between_pages, acc, stop_event,
+                lambda s_rem: f"[L{thread_id}] Đã xong Page {idx}/{acc.target_pages}! Nghỉ {s_rem}s trước khi Reg Page {idx + 1}..."
+            )
+            if reason:
+                _handle_interrupt_exit(acc, reason)
+                return
 
     if acc.pages_created == 0:
         if hit_limit:
@@ -2736,15 +2829,22 @@ def worker_reg_account(
     custom_names: Optional[List[str]],
     verify_delay: int,
     delay_between_pages: int,
-    stats: Dict[str, int]
+    stats: Dict[str, int],
+    stop_event: Optional[threading.Event] = None
 ):
     while True:
+        if stop_event is not None and stop_event.is_set():
+            break
         try:
-            acc = queue_obj.get(timeout=2.0)
+            acc = queue_obj.get(timeout=0.5)
         except Empty:
             break
 
         try:
+            if stop_event is not None and stop_event.is_set():
+                acc.status = "limit"
+                acc.current_action = "🛑 Đã dừng khẩn cấp"
+                continue
             process_single_account_workflow(
                 thread_id=thread_id,
                 acc=acc,
@@ -2752,7 +2852,8 @@ def worker_reg_account(
                 custom_names=custom_names,
                 verify_delay=verify_delay,
                 delay_between_pages=delay_between_pages,
-                stats=stats
+                stats=stats,
+                stop_event=stop_event
             )
         except Exception as e:
             acc.status = "die"
@@ -2763,7 +2864,7 @@ def worker_reg_account(
 
 
 # ==============================================================================
-# 8. BẢNG ĐIỀU KHIỂN GUI (CUSTOMTKINTER DARK MODE - 3 TAB ĐẦY ĐỦ)
+# 8. BẢNG ĐIỀU KHIỂN GUI (CUSTOMTKINTER DARK MODE - 3 TAB + AUTO CONFIG.JSON)
 # ==============================================================================
 
 def get_app_dir() -> str:
@@ -2821,15 +2922,17 @@ class RegPageControlPanel(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
         self.title("TOOL REG PAGE PRO5 VIP (CORE V5) + CHUYỂN PAGE SIÊU MẠNH")
-        self.geometry("1380x840")
-        self.minsize(1180, 720)
+        self.geometry("1400x850")
+        self.minsize(1200, 730)
 
         self.app_dir = get_app_dir()
+        self.config_path = os.path.join(self.app_dir, "config.json")
         self.ttk_style = ttk.Style(self)
         configure_dark_treeview(self.ttk_style)
 
         # Trạng thái Tab 1 (Reg + Chuyển Cuốn Chiếu)
         self.reg_running = False
+        self.reg_stop_event = threading.Event()
         self.reg_tasks: List[AccountTask] = []
         self.reg_tree_iids: Dict[int, str] = {}
         self.reg_queue: Optional[Queue] = None
@@ -2860,9 +2963,133 @@ class RegPageControlPanel(ctk.CTk):
 
         self._build_header()
         self._build_tabs()
+        self._load_config()
 
-        # Vòng lặp cập nhật UI mượt mà (300ms)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(300, self._ui_poll_loop)
+
+    # --------------------------------------------------------------------------
+    # LƯU & NẠP CẤU HÌNH TỰ ĐỘNG (CONFIG.JSON)
+    # --------------------------------------------------------------------------
+    def _collect_config(self) -> Dict[str, Any]:
+        return {
+            "active_tab": self.tabview.get(),
+            "tab1": {
+                "holder": self.reg_holder_entry.get().strip(),
+                "transfer_old": bool(self.reg_transfer_old_var.get()),
+                "default_pwd": self.reg_default_pwd.get().strip(),
+                "name_mode": self.reg_name_mode.get(),
+                "name_file": self.reg_name_file.get().strip(),
+                "buff_media": bool(self.reg_buff_media_var.get()),
+                "media_path": self.reg_media_path.get().strip(),
+                "ua_mode": self.reg_ua_mode.get(),
+                "proxies": self.reg_proxy_box.get("1.0", "end").strip(),
+                "pages_per_acc": self.reg_pages_per_acc.get().strip(),
+                "verify_delay": self.reg_verify_delay.get().strip(),
+                "delay_between": self.reg_delay_between.get().strip(),
+                "threads": self.reg_threads.get().strip(),
+            },
+            "tab2": {
+                "default_pwd": self.tr_default_pwd.get().strip(),
+                "targets": self.tr_target_box.get("1.0", "end").strip(),
+                "dist_mode": self.tr_dist_mode.get(),
+                "delay": self.tr_delay_entry.get().strip(),
+                "quick_select": self.tr_select_entry.get().strip(),
+            },
+            "tab3": {
+                "threads": self.tk_threads_entry.get().strip(),
+            },
+        }
+
+    def _save_config(self, show_feedback: bool = False):
+        try:
+            cfg = self._collect_config()
+            with FILE_LOCK:
+                with open(self.config_path, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, ensure_ascii=False, indent=2)
+            if show_feedback and hasattr(self, "btn_save_cfg"):
+                self.btn_save_cfg.configure(text="✔ Đã lưu config", fg_color="#16a34a")
+                self.after(1500, lambda: self.btn_save_cfg.configure(text="💾 Lưu cấu hình", fg_color="#1d4ed8"))
+        except Exception as e:
+            logger.error(f"Lỗi lưu config.json: {e}")
+            if show_feedback:
+                messagebox.showerror("Lỗi lưu cấu hình", str(e))
+
+    def _load_config(self):
+        if not os.path.isfile(self.config_path):
+            return
+        try:
+            with open(self.config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            if not isinstance(cfg, dict):
+                return
+
+            def _set_entry(ent: ctk.CTkEntry, val: Any):
+                if val is not None:
+                    ent.delete(0, "end")
+                    ent.insert(0, str(val))
+
+            def _set_option(opt: ctk.CTkOptionMenu, val: Any):
+                if val and val in opt.cget("values"):
+                    opt.set(val)
+
+            t1 = cfg.get("tab1", {})
+            if isinstance(t1, dict):
+                _set_entry(self.reg_holder_entry, t1.get("holder", ""))
+                if "transfer_old" in t1:
+                    self.reg_transfer_old_var.set(bool(t1["transfer_old"]))
+                _set_entry(self.reg_default_pwd, t1.get("default_pwd", ""))
+                _set_option(self.reg_name_mode, t1.get("name_mode"))
+                _set_entry(self.reg_name_file, t1.get("name_file", ""))
+                if "buff_media" in t1:
+                    self.reg_buff_media_var.set(bool(t1["buff_media"]))
+                _set_entry(self.reg_media_path, t1.get("media_path", ""))
+                _set_option(self.reg_ua_mode, t1.get("ua_mode"))
+                if t1.get("proxies"):
+                    self.reg_proxy_box.delete("1.0", "end")
+                    self.reg_proxy_box.insert("1.0", str(t1["proxies"]))
+                if t1.get("pages_per_acc"):
+                    _set_entry(self.reg_pages_per_acc, t1["pages_per_acc"])
+                if t1.get("verify_delay"):
+                    _set_entry(self.reg_verify_delay, t1["verify_delay"])
+                if t1.get("delay_between") is not None and str(t1.get("delay_between")) != "":
+                    _set_entry(self.reg_delay_between, t1["delay_between"])
+                if t1.get("threads"):
+                    _set_entry(self.reg_threads, t1["threads"])
+
+            t2 = cfg.get("tab2", {})
+            if isinstance(t2, dict):
+                _set_entry(self.tr_default_pwd, t2.get("default_pwd", ""))
+                if t2.get("targets"):
+                    self.tr_target_box.delete("1.0", "end")
+                    self.tr_target_box.insert("1.0", str(t2["targets"]))
+                    self._update_tr_dst_count()
+                _set_option(self.tr_dist_mode, t2.get("dist_mode"))
+                if t2.get("delay") is not None and str(t2.get("delay")) != "":
+                    _set_entry(self.tr_delay_entry, t2["delay"])
+                _set_entry(self.tr_select_entry, t2.get("quick_select", ""))
+
+            t3 = cfg.get("tab3", {})
+            if isinstance(t3, dict) and t3.get("threads"):
+                _set_entry(self.tk_threads_entry, t3["threads"])
+
+            active_tab = cfg.get("active_tab")
+            if active_tab:
+                try:
+                    self.tabview.set(active_tab)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error(f"Lỗi đọc config.json: {e}")
+
+    def _on_close(self):
+        self._save_config(show_feedback=False)
+        self.reg_stop_event.set()
+        self.tr_stop_flag.set()
+        self.tk_stop_flag.set()
+        for acc in self.reg_tasks:
+            acc.skip_event.set()
+        self.destroy()
 
     # --------------------------------------------------------------------------
     # HEADER CHUNG
@@ -2882,6 +3109,13 @@ class RegPageControlPanel(ctk.CTk):
 
         btn_bar = ctk.CTkFrame(header, fg_color="transparent")
         btn_bar.pack(side="right", padx=14)
+
+        self.btn_save_cfg = ctk.CTkButton(
+            btn_bar, text="💾 Lưu cấu hình", width=124, height=30,
+            fg_color="#1d4ed8", hover_color="#1e40af",
+            command=lambda: self._save_config(show_feedback=True),
+        )
+        self.btn_save_cfg.pack(side="left", padx=4)
 
         ctk.CTkButton(
             btn_bar, text="📂 Thư mục Tool", width=118, height=30,
@@ -2920,11 +3154,9 @@ class RegPageControlPanel(ctk.CTk):
         container = ctk.CTkFrame(self.tab_reg, fg_color="transparent")
         container.pack(fill="both", expand=True)
 
-        # --- CỘT TRÁI: CẤU HÌNH ---
-        left_panel = ctk.CTkScrollableFrame(container, width=410, fg_color="#181c26")
+        left_panel = ctk.CTkScrollableFrame(container, width=415, fg_color="#181c26")
         left_panel.pack(side="left", fill="y", padx=(0, 8), pady=2)
 
-        # 1. Nick mẹ nhận Page
         self._section_label(left_panel, "1. Nick Mẹ nhận Page (Để trống = chỉ tạo Page)")
         self.reg_holder_entry = ctk.CTkEntry(
             left_panel, placeholder_text="UID Nick Mẹ hoặc Token / UID|Pass|Cookie|Token..."
@@ -2936,7 +3168,6 @@ class RegPageControlPanel(ctk.CTk):
             variable=self.reg_transfer_old_var, font=("Segoe UI", 12)
         ).pack(anchor="w", padx=10, pady=(0, 8))
 
-        # 2. Danh sách Acc nguồn
         acc_hdr = ctk.CTkFrame(left_panel, fg_color="transparent")
         acc_hdr.pack(fill="x", padx=10)
         self.reg_acc_count_lbl = ctk.CTkLabel(
@@ -2950,7 +3181,7 @@ class RegPageControlPanel(ctk.CTk):
             command=lambda: self._load_file_to_textbox(self.reg_acc_box, self._update_reg_acc_count)
         ).pack(side="right")
 
-        self.reg_acc_box = ctk.CTkTextbox(left_panel, height=120, font=("Consolas", 11))
+        self.reg_acc_box = ctk.CTkTextbox(left_panel, height=115, font=("Consolas", 11))
         self.reg_acc_box.pack(fill="x", padx=10, pady=(4, 4))
         self.reg_acc_box.bind("<KeyRelease>", lambda _e: self._update_reg_acc_count())
 
@@ -2959,7 +3190,6 @@ class RegPageControlPanel(ctk.CTk):
         )
         self.reg_default_pwd.pack(fill="x", padx=10, pady=(0, 8))
 
-        # 3. Tên Page
         self._section_label(left_panel, "3. Cấu hình tên Page")
         name_row = ctk.CTkFrame(left_panel, fg_color="transparent")
         name_row.pack(fill="x", padx=10, pady=(2, 4))
@@ -2974,7 +3204,6 @@ class RegPageControlPanel(ctk.CTk):
             command=lambda: self._pick_file_to_entry(self.reg_name_file, [("Text", "*.txt")])
         ).pack(side="right")
 
-        # 4. Kho ảnh Avatar & Cover
         self._section_label(left_panel, "4. Kho ảnh Avatar & Cover Pro5")
         self.reg_buff_media_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(
@@ -2999,7 +3228,6 @@ class RegPageControlPanel(ctk.CTk):
             command=lambda: self._pick_dir_to_entry(self.reg_media_path)
         ).pack(side="right")
 
-        # 5. User-Agent & Proxy
         self._section_label(left_panel, "5. User-Agent & Proxy (tùy chọn)")
         self.reg_ua_mode = ctk.CTkOptionMenu(
             left_panel, values=["Cố định 1 UA / Nick (Khuyên dùng)", "Random UA mỗi Page"]
@@ -3014,13 +3242,12 @@ class RegPageControlPanel(ctk.CTk):
             fg_color="#2a3245", hover_color="#39445d",
             command=lambda: self._load_file_to_textbox(self.reg_proxy_box)
         ).pack(side="right")
-        self.reg_proxy_box = ctk.CTkTextbox(left_panel, height=62, font=("Consolas", 11))
+        self.reg_proxy_box = ctk.CTkTextbox(left_panel, height=58, font=("Consolas", 11))
         self.reg_proxy_box.pack(fill="x", padx=10, pady=(3, 8))
 
-        # 6. Thông số chạy
         self._section_label(left_panel, "6. Thông số chạy & Luồng")
         grid_cfg = ctk.CTkFrame(left_panel, fg_color="transparent")
-        grid_cfg.pack(fill="x", padx=10, pady=(2, 10))
+        grid_cfg.pack(fill="x", padx=10, pady=(2, 8))
         grid_cfg.columnconfigure((0, 1), weight=1)
 
         self.reg_pages_per_acc = self._labeled_spin_entry(grid_cfg, "Page / Acc:", "4", 0, 0)
@@ -3028,31 +3255,37 @@ class RegPageControlPanel(ctk.CTk):
         self.reg_delay_between = self._labeled_spin_entry(grid_cfg, "Nghỉ giữa Page (s):", "5", 1, 0)
         self.reg_threads = self._labeled_spin_entry(grid_cfg, "Số luồng:", "3", 1, 1)
 
-        # Nút điều khiển
-        ctrl_row = ctk.CTkFrame(left_panel, fg_color="transparent")
-        ctrl_row.pack(fill="x", padx=10, pady=(4, 12))
         self.btn_reg_start = ctk.CTkButton(
-            ctrl_row, text="▶ BẮT ĐẦU CHẠY", height=40,
+            left_panel, text="▶ BẮT ĐẦU CHẠY", height=40,
             font=ctk.CTkFont(size=13, weight="bold"),
             fg_color="#16a34a", hover_color="#15803d",
             command=self._start_reg_workflow
         )
-        self.btn_reg_start.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        self.btn_reg_start.pack(fill="x", padx=10, pady=(2, 6))
+
+        ctrl_row2 = ctk.CTkFrame(left_panel, fg_color="transparent")
+        ctrl_row2.pack(fill="x", padx=10, pady=(0, 12))
+        self.btn_reg_skip = ctk.CTkButton(
+            ctrl_row2, text="⏭ SANG ACC KHÁC", height=36,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color="#d97706", hover_color="#b45309",
+            state="disabled",
+            command=self._skip_current_acc
+        )
+        self.btn_reg_skip.pack(side="left", fill="x", expand=True, padx=(0, 6))
 
         self.btn_reg_stop = ctk.CTkButton(
-            ctrl_row, text="⏹ DỪNG HÀNG ĐỢI", height=40, width=130,
+            ctrl_row2, text="🛑 DỪNG KHẨN CẤP", height=36,
             font=ctk.CTkFont(size=12, weight="bold"),
             fg_color="#dc2626", hover_color="#b91c1c",
             state="disabled",
-            command=self._stop_reg_workflow
+            command=self._emergency_stop_reg
         )
-        self.btn_reg_stop.pack(side="right")
+        self.btn_reg_stop.pack(side="right", fill="x", expand=True)
 
-        # --- CỘT PHẢI: DASHBOARD THỐNG KÊ + BẢNG + LIVE LOG ---
         right_panel = ctk.CTkFrame(container, fg_color="transparent")
         right_panel.pack(side="right", fill="both", expand=True)
 
-        # Thẻ thống kê
         stats_bar = ctk.CTkFrame(right_panel, fg_color="transparent")
         stats_bar.pack(fill="x", pady=(0, 8))
         stats_bar.columnconfigure((0, 1, 2, 3, 4, 5), weight=1)
@@ -3066,7 +3299,6 @@ class RegPageControlPanel(ctk.CTk):
             "total_die": self._create_stat_card(stats_bar, "ACC DIE", "0", "#ef4444", 5),
         }
 
-        # Bảng tiến trình
         table_frame = ctk.CTkFrame(right_panel, fg_color="#181c26")
         table_frame.pack(fill="both", expand=True, pady=(0, 8))
 
@@ -3100,7 +3332,6 @@ class RegPageControlPanel(ctk.CTk):
         self.reg_tree.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=6)
         reg_scroll.pack(side="right", fill="y", pady=6, padx=(0, 4))
 
-        # Khung Live Logs
         log_frame = ctk.CTkFrame(right_panel, height=225, fg_color="#141824")
         log_frame.pack(fill="x")
         log_frame.pack_propagate(False)
@@ -3108,8 +3339,8 @@ class RegPageControlPanel(ctk.CTk):
         log_hdr = ctk.CTkFrame(log_frame, fg_color="transparent")
         log_hdr.pack(fill="x", padx=8, pady=(4, 0))
         ctk.CTkLabel(
-            log_hdr, text="📋 NHẬT KÝ TIẾN TRÌNH TRỰC TIẾP",
-            font=ctk.CTkFont(size=12, weight="bold"), text_color="#c084fc"
+            log_hdr, text="📋 NHẬT KÝ TIẾN TRÌNH TRỰC TIẾP (Click 1 dòng Acc trên bảng rồi bấm 'Sang Acc Khác' để bỏ qua riêng Acc đó)",
+            font=ctk.CTkFont(size=11, weight="bold"), text_color="#c084fc"
         ).pack(side="left")
         ctk.CTkButton(
             log_hdr, text="Xóa log", width=66, height=22,
@@ -3135,6 +3366,8 @@ class RegPageControlPanel(ctk.CTk):
     def _start_reg_workflow(self):
         if self.reg_running:
             return
+
+        self._save_config(show_feedback=False)
 
         raw_lines = [l.strip() for l in self.reg_acc_box.get("1.0", "end").splitlines() if l.strip()]
         parsed_items = parse_universal_lines(raw_lines)
@@ -3177,7 +3410,9 @@ class RegPageControlPanel(ctk.CTk):
         transfer_old_pages = self.reg_transfer_old_var.get()
 
         self.reg_running = True
+        self.reg_stop_event.clear()
         self.btn_reg_start.configure(state="disabled", text="⏳ ĐANG KHỞI TẠO...")
+        self.btn_reg_skip.configure(state="normal")
         self.btn_reg_stop.configure(state="normal")
         self._clear_reg_log()
         for iid in self.reg_tree.get_children():
@@ -3198,8 +3433,10 @@ class RegPageControlPanel(ctk.CTk):
             holder_targets = []
             if holder_raw and holder_raw != "0":
                 GUI_LOG_QUEUE.put(("Đang xác thực thông tin Nick Mẹ nhận Page...\n", "cyan"))
-                parsed_targets = parse_holder_target(holder_raw)
+                parsed_targets = parse_target_lines_flexible(holder_raw)
                 for t in parsed_targets:
+                    if self.reg_stop_event.is_set():
+                        break
                     if t.get("token") and not t.get("uid"):
                         info_nhan = get_id(t["token"], proxy=t.get("proxy"))
                         if info_nhan:
@@ -3216,6 +3453,11 @@ class RegPageControlPanel(ctk.CTk):
                         else:
                             GUI_LOG_QUEUE.put((f"✔ UID Nick Mẹ: {t['uid']} -> Bắn lời mời Bước 1 & 2.\n", "success"))
                         holder_targets.append(t)
+
+            if self.reg_stop_event.is_set():
+                self.reg_running = False
+                self.after(0, self._on_reg_finished)
+                return
 
             task_q: Queue = Queue()
             tasks: List[AccountTask] = []
@@ -3246,7 +3488,7 @@ class RegPageControlPanel(ctk.CTk):
             for t_id in range(1, actual_threads + 1):
                 th = threading.Thread(
                     target=worker_reg_account,
-                    args=(t_id, task_q, name_type, custom_names, verify_delay, delay_between, self.reg_stats),
+                    args=(t_id, task_q, name_type, custom_names, verify_delay, delay_between, self.reg_stats, self.reg_stop_event),
                     daemon=True,
                 )
                 workers.append(th)
@@ -3259,7 +3501,10 @@ class RegPageControlPanel(ctk.CTk):
                 th.join()
 
             self.reg_running = False
-            GUI_LOG_QUEUE.put(("=== HOÀN TẤT TOÀN BỘ TIẾN TRÌNH REG & CHUYỂN PAGE ===\n", "success"))
+            if self.reg_stop_event.is_set():
+                GUI_LOG_QUEUE.put(("🛑 ĐÃ DỪNG KHẨN CẤP! Bạn có thể sửa thông số và bấm 'BẮT ĐẦU CHẠY' lại ngay.\n", "warn"))
+            else:
+                GUI_LOG_QUEUE.put(("=== HOÀN TẤT TOÀN BỘ TIẾN TRÌNH REG & CHUYỂN PAGE ===\n", "success"))
             self.after(0, self._on_reg_finished)
 
         threading.Thread(target=_bootstrap, daemon=True).start()
@@ -3275,26 +3520,61 @@ class RegPageControlPanel(ctk.CTk):
             self.reg_tree_iids[acc.acc_id] = iid
         self.stat_cards["total_acc"].configure(text=str(len(self.reg_tasks)))
 
-    def _stop_reg_workflow(self):
-        if not self.reg_running or not self.reg_queue:
+    def _skip_current_acc(self):
+        if not self.reg_running:
             return
+        selected_iids = set(self.reg_tree.selection())
+        targets_to_skip: List[AccountTask] = []
+
+        if selected_iids:
+            for acc in self.reg_tasks:
+                iid = self.reg_tree_iids.get(acc.acc_id)
+                if iid in selected_iids and acc.status in ("running", "waiting_check"):
+                    targets_to_skip.append(acc)
+
+        if not targets_to_skip:
+            targets_to_skip = [a for a in self.reg_tasks if a.status in ("running", "waiting_check")]
+
+        if not targets_to_skip:
+            GUI_LOG_QUEUE.put(("Không có Acc nào đang chạy để bỏ qua.\n", "warn"))
+            return
+
+        for acc in targets_to_skip:
+            acc.skip_event.set()
+            acc.current_action = "⏭ Đang ngắt để nhảy sang Acc tiếp theo..."
+        ids_str = ", ".join(f"#{a.acc_id}" for a in targets_to_skip)
+        GUI_LOG_QUEUE.put((f"⏭ Đã kích hoạt bỏ qua Acc {ids_str} -> Luồng sẽ tự chuyển sang Acc kế tiếp ngay!\n", "warn"))
+
+    def _emergency_stop_reg(self):
+        if not self.reg_running:
+            return
+        self.reg_stop_event.set()
+        for acc in self.reg_tasks:
+            if acc.status in ("running", "waiting_check"):
+                acc.skip_event.set()
+                acc.current_action = "🛑 Đang dừng khẩn cấp..."
+
         cleared = 0
-        while True:
-            try:
-                acc = self.reg_queue.get_nowait()
-                acc.status = "limit"
-                acc.current_action = "Đã dừng bởi người dùng"
-                self.reg_queue.task_done()
-                cleared += 1
-            except Empty:
-                break
-        self.btn_reg_stop.configure(state="disabled")
-        GUI_LOG_QUEUE.put((f"⏹ Đã hủy {cleared} Acc đang chờ trong hàng đợi. Đang đợi các luồng đang chạy kết thúc bước hiện tại...\n", "warn"))
+        if self.reg_queue is not None:
+            while True:
+                try:
+                    acc = self.reg_queue.get_nowait()
+                    acc.status = "limit"
+                    acc.current_action = "🛑 Đã dừng khẩn cấp"
+                    self.reg_queue.task_done()
+                    cleared += 1
+                except Empty:
+                    break
+
+        self.btn_reg_stop.configure(state="disabled", text="⏳ ĐANG DỪNG...")
+        self.btn_reg_skip.configure(state="disabled")
+        GUI_LOG_QUEUE.put((f"🛑 DỪNG KHẨN CẤP! Đã ngắt các luồng đang đếm ngược & hủy {cleared} Acc chờ...\n", "error"))
 
     def _on_reg_finished(self):
         self._refresh_reg_dashboard()
         self.btn_reg_start.configure(state="normal", text="▶ BẮT ĐẦU CHẠY")
-        self.btn_reg_stop.configure(state="disabled")
+        self.btn_reg_skip.configure(state="disabled")
+        self.btn_reg_stop.configure(state="disabled", text="🛑 DỪNG KHẨN CẤP")
 
     def _refresh_reg_dashboard(self):
         if not self.reg_tasks:
@@ -3318,7 +3598,7 @@ class RegPageControlPanel(ctk.CTk):
         self.stat_cards["total_die"].configure(text=str(self.reg_stats.get("total_token_die", 0)))
 
     # ==========================================================================
-    # TAB 2: QUÉT & CHUYỂN PAGE ĐỘC LẬP
+    # TAB 2: QUÉT & CHUYỂN PAGE ĐỘC LẬP (CHỌN NHANH 1-5 / 1,2,5,6 + NHIỀU UID NHẬN)
     # ==========================================================================
     def _build_tab_transfer(self):
         top_box = ctk.CTkFrame(self.tab_transfer, fg_color="#181c26")
@@ -3330,7 +3610,7 @@ class RegPageControlPanel(ctk.CTk):
         src_hdr = ctk.CTkFrame(src_frame, fg_color="transparent")
         src_hdr.pack(fill="x")
         ctk.CTkLabel(
-            src_hdr, text="1. Danh sách Nick đang cầm Page (UID|Pass|Cookie|Token...)",
+            src_hdr, text="1. Log Nick cầm Page (UID|Pass|Token hoặc UID|Pass|Cookie|Token...)",
             font=ctk.CTkFont(size=12, weight="bold"), text_color="#38bdf8"
         ).pack(side="left")
         ctk.CTkButton(
@@ -3339,7 +3619,7 @@ class RegPageControlPanel(ctk.CTk):
             command=lambda: self._load_file_to_textbox(self.tr_src_box)
         ).pack(side="right")
 
-        self.tr_src_box = ctk.CTkTextbox(src_frame, height=96, font=("Consolas", 11))
+        self.tr_src_box = ctk.CTkTextbox(src_frame, height=110, font=("Consolas", 11))
         self.tr_src_box.pack(fill="x", pady=(4, 6))
 
         src_sub = ctk.CTkFrame(src_frame, fg_color="transparent")
@@ -3349,37 +3629,56 @@ class RegPageControlPanel(ctk.CTk):
         )
         self.tr_default_pwd.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self.btn_tr_scan = ctk.CTkButton(
-            src_sub, text="🔍 QUÉT DANH SÁCH PAGE", width=185, height=32,
+            src_sub, text="🔍 QUÉT DANH SÁCH PAGE", width=185, height=34,
             font=ctk.CTkFont(size=12, weight="bold"),
             command=self._start_scan_pages
         )
         self.btn_tr_scan.pack(side="right")
 
-        dst_frame = ctk.CTkFrame(top_box, width=430, fg_color="#141824")
+        dst_frame = ctk.CTkFrame(top_box, width=520, fg_color="#141824")
         dst_frame.pack(side="right", fill="y", padx=(0, 10), pady=8)
         dst_frame.pack_propagate(False)
 
-        ctk.CTkLabel(
-            dst_frame, text="2. Tài khoản nhận Page (UID hoặc Token Auto Accept)",
-            font=ctk.CTkFont(size=12, weight="bold"), text_color="#4ade80"
-        ).pack(anchor="w", padx=12, pady=(10, 4))
-
-        self.tr_target_entry = ctk.CTkEntry(
-            dst_frame, placeholder_text="Nhập chỉ UID (bắn mời) hoặc Token/Dòng full (Auto Accept)"
+        dst_hdr = ctk.CTkFrame(dst_frame, fg_color="transparent")
+        dst_hdr.pack(fill="x", padx=12, pady=(8, 3))
+        self.tr_dst_count_lbl = ctk.CTkLabel(
+            dst_hdr, text="2. Danh sách Nick nhận (UID|Token, UID Token hoặc chỉ UID) [0]",
+            font=ctk.CTkFont(size=11, weight="bold"), text_color="#4ade80"
         )
-        self.tr_target_entry.pack(fill="x", padx=12, pady=(0, 8))
+        self.tr_dst_count_lbl.pack(side="left")
+        ctk.CTkButton(
+            dst_hdr, text="Nạp file", width=66, height=22,
+            fg_color="#2a3245", hover_color="#39445d",
+            command=lambda: self._load_file_to_textbox(self.tr_target_box, self._update_tr_dst_count)
+        ).pack(side="right")
 
-        d_row = ctk.CTkFrame(dst_frame, fg_color="transparent")
-        d_row.pack(fill="x", padx=12, pady=(0, 10))
-        ctk.CTkLabel(d_row, text="Delay giữa mỗi Page (giây):").pack(side="left")
-        self.tr_delay_entry = ctk.CTkEntry(d_row, width=70)
+        self.tr_target_box = ctk.CTkTextbox(dst_frame, height=74, font=("Consolas", 11))
+        self.tr_target_box.pack(fill="x", padx=12, pady=(0, 6))
+        self.tr_target_box.bind("<KeyRelease>", lambda _e: self._update_tr_dst_count())
+
+        mode_row = ctk.CTkFrame(dst_frame, fg_color="transparent")
+        mode_row.pack(fill="x", padx=12, pady=(0, 6))
+        self.tr_dist_mode = ctk.CTkOptionMenu(
+            mode_row,
+            values=[
+                "Chia đều tuần tự (VD: 1-5 -> Nick 1, 6-10 -> Nick 2)",
+                "Xoay vòng từng Page (1->N1, 2->N2...)",
+                "Gửi TẤT CẢ Page đã chọn cho MỖI Nick nhận"
+            ],
+            width=340,
+            font=("Segoe UI", 11)
+        )
+        self.tr_dist_mode.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        ctk.CTkLabel(mode_row, text="Delay(s):", font=("Segoe UI", 11)).pack(side="left")
+        self.tr_delay_entry = ctk.CTkEntry(mode_row, width=54, height=28)
         self.tr_delay_entry.insert(0, "2")
-        self.tr_delay_entry.pack(side="left", padx=8)
+        self.tr_delay_entry.pack(side="right", padx=(4, 0))
 
         tr_btn_row = ctk.CTkFrame(dst_frame, fg_color="transparent")
-        tr_btn_row.pack(fill="x", padx=12, pady=(4, 10))
+        tr_btn_row.pack(fill="x", padx=12, pady=(2, 8))
         self.btn_tr_run = ctk.CTkButton(
-            tr_btn_row, text="🚀 CHUYỂN PAGE ĐÃ CHỌN", height=38,
+            tr_btn_row, text="🚀 CHUYỂN PAGE ĐÃ CHỌN", height=36,
             font=ctk.CTkFont(size=12, weight="bold"),
             fg_color="#16a34a", hover_color="#15803d",
             command=self._start_transfer_selected
@@ -3387,36 +3686,57 @@ class RegPageControlPanel(ctk.CTk):
         self.btn_tr_run.pack(side="left", fill="x", expand=True, padx=(0, 6))
 
         self.btn_tr_stop = ctk.CTkButton(
-            tr_btn_row, text="⏹ DỪNG", width=80, height=38,
+            tr_btn_row, text="🛑 DỪNG NGAY", width=115, height=36,
+            font=ctk.CTkFont(size=12, weight="bold"),
             fg_color="#dc2626", hover_color="#b91c1c", state="disabled",
             command=self._stop_transfer_selected
         )
         self.btn_tr_stop.pack(side="right")
 
-        bar_mid = ctk.CTkFrame(self.tab_transfer, fg_color="transparent")
-        bar_mid.pack(fill="x", pady=(0, 4))
+        bar_mid = ctk.CTkFrame(self.tab_transfer, fg_color="#141824", corner_radius=6)
+        bar_mid.pack(fill="x", pady=(0, 6))
+
         self.tr_summary_lbl = ctk.CTkLabel(
-            bar_mid, text="Chưa quét Page nào (Click vào từng dòng để chọn / bỏ chọn Page)",
-            font=("Segoe UI", 12), text_color="#cbd5e1"
+            bar_mid, text="Chưa quét Page nào",
+            font=ctk.CTkFont(size=12, weight="bold"), text_color="#cbd5e1"
         )
-        self.tr_summary_lbl.pack(side="left")
+        self.tr_summary_lbl.pack(side="left", padx=10, pady=6)
+
+        sel_ctrl = ctk.CTkFrame(bar_mid, fg_color="transparent")
+        sel_ctrl.pack(side="right", padx=8, pady=5)
+
+        ctk.CTkLabel(sel_ctrl, text="Chọn nhanh STT:", font=("Segoe UI", 12), text_color="#38bdf8").pack(side="left", padx=(0, 6))
+        self.tr_select_entry = ctk.CTkEntry(
+            sel_ctrl, width=230, height=28,
+            placeholder_text="VD: 1-5 hoặc 1-20 hoặc 1,2,5,6"
+        )
+        self.tr_select_entry.pack(side="left", padx=(0, 6))
+        self.tr_select_entry.bind("<Return>", lambda _e: self._apply_quick_selection())
 
         ctk.CTkButton(
-            bar_mid, text="Bỏ chọn hết", width=95, height=26,
-            fg_color="#262c3d", hover_color="#343d54",
-            command=lambda: self._toggle_all_tr_pages(False)
-        ).pack(side="right", padx=(6, 0))
+            sel_ctrl, text="✔ Chọn theo số", width=112, height=28,
+            fg_color="#2563eb", hover_color="#1d4ed8",
+            command=self._apply_quick_selection
+        ).pack(side="left", padx=(0, 6))
+
         ctk.CTkButton(
-            bar_mid, text="Chọn tất cả", width=95, height=26,
+            sel_ctrl, text="Chọn tất cả", width=88, height=28,
             fg_color="#262c3d", hover_color="#343d54",
             command=lambda: self._toggle_all_tr_pages(True)
-        ).pack(side="right")
+        ).pack(side="left", padx=(0, 4))
+
+        ctk.CTkButton(
+            sel_ctrl, text="Bỏ chọn hết", width=88, height=28,
+            fg_color="#262c3d", hover_color="#343d54",
+            command=lambda: self._toggle_all_tr_pages(False)
+        ).pack(side="left")
 
         mid_table = ctk.CTkFrame(self.tab_transfer, fg_color="#181c26")
         mid_table.pack(fill="both", expand=True, pady=(0, 8))
 
-        cols = ("chk", "src_uid", "page_name", "page_id", "profile_uid", "status")
+        cols = ("stt", "chk", "src_uid", "page_name", "page_id", "profile_uid", "status")
         self.tr_tree = ttk.Treeview(mid_table, columns=cols, show="headings", style="Dark.Treeview")
+        self.tr_tree.heading("stt", text="STT")
         self.tr_tree.heading("chk", text="Chọn")
         self.tr_tree.heading("src_uid", text="Nick Cầm Page")
         self.tr_tree.heading("page_name", text="Tên Page")
@@ -3424,11 +3744,12 @@ class RegPageControlPanel(ctk.CTk):
         self.tr_tree.heading("profile_uid", text="ProfileUID (615...)")
         self.tr_tree.heading("status", text="Trạng thái chuyển")
 
-        self.tr_tree.column("chk", width=55, anchor="center", stretch=False)
-        self.tr_tree.column("src_uid", width=150, anchor="w", stretch=False)
-        self.tr_tree.column("page_name", width=230, anchor="w", stretch=False)
-        self.tr_tree.column("page_id", width=145, anchor="w", stretch=False)
-        self.tr_tree.column("profile_uid", width=155, anchor="w", stretch=False)
+        self.tr_tree.column("stt", width=46, anchor="center", stretch=False)
+        self.tr_tree.column("chk", width=50, anchor="center", stretch=False)
+        self.tr_tree.column("src_uid", width=145, anchor="w", stretch=False)
+        self.tr_tree.column("page_name", width=220, anchor="w", stretch=False)
+        self.tr_tree.column("page_id", width=140, anchor="w", stretch=False)
+        self.tr_tree.column("profile_uid", width=150, anchor="w", stretch=False)
         self.tr_tree.column("status", width=360, anchor="w", stretch=True)
 
         self.tr_tree.tag_configure("ok", foreground="#4ade80")
@@ -3444,11 +3765,17 @@ class RegPageControlPanel(ctk.CTk):
         tr_sc.pack(side="right", fill="y", pady=6, padx=(0, 4))
 
         self.tr_log_box = ctk.CTkTextbox(
-            self.tab_transfer, height=145, font=("Consolas", 11),
+            self.tab_transfer, height=135, font=("Consolas", 11),
             fg_color="#0f121a", text_color="#e2e8f0"
         )
         self.tr_log_box.pack(fill="x")
         self._init_log_tags(self.tr_log_box)
+
+    def _update_tr_dst_count(self):
+        lines = [l for l in self.tr_target_box.get("1.0", "end").splitlines() if l.strip()]
+        self.tr_dst_count_lbl.configure(
+            text=f"2. Danh sách Nick nhận (UID|Token, UID Token hoặc chỉ UID) [{len(lines)}]"
+        )
 
     def _tr_log(self, msg: str, tag: str = "info"):
         now_s = datetime.datetime.now().strftime("%H:%M:%S")
@@ -3465,9 +3792,33 @@ class RegPageControlPanel(ctk.CTk):
             item = self.tr_pages_data[idx]
             item["selected"] = not item["selected"]
             vals = list(self.tr_tree.item(iid, "values"))
-            vals[0] = "☑" if item["selected"] else "☐"
+            vals[1] = "☑" if item["selected"] else "☐"
             self.tr_tree.item(iid, values=vals)
             self._update_tr_summary()
+
+    def _apply_quick_selection(self):
+        if self.tr_running or not self.tr_pages_data:
+            return
+        expr = self.tr_select_entry.get().strip()
+        if not expr:
+            messagebox.showinfo("Hướng dẫn", "Hãy nhập dãy STT cần chọn.\nVí dụ: 1-5 hoặc 1-20 hoặc 1, 2, 5, 6 hoặc all")
+            return
+        chosen_1based = set(parse_selection(expr, len(self.tr_pages_data)))
+        if not chosen_1based:
+            messagebox.showwarning("Cú pháp chưa đúng", f"Không khớp STT nào trong khoảng 1 đến {len(self.tr_pages_data)}.")
+            return
+
+        for idx, item in enumerate(self.tr_pages_data):
+            state = (idx + 1) in chosen_1based
+            item["selected"] = state
+            iid = str(idx)
+            if self.tr_tree.exists(iid):
+                vals = list(self.tr_tree.item(iid, "values"))
+                vals[1] = "☑" if state else "☐"
+                self.tr_tree.item(iid, values=vals)
+        self._update_tr_summary()
+        self._save_config(show_feedback=False)
+        self._tr_log(f"✔ Đã chọn nhanh {len(chosen_1based)} Page theo cú pháp: {expr}", "cyan")
 
     def _toggle_all_tr_pages(self, state: bool):
         if self.tr_running:
@@ -3477,23 +3828,25 @@ class RegPageControlPanel(ctk.CTk):
             iid = str(idx)
             if self.tr_tree.exists(iid):
                 vals = list(self.tr_tree.item(iid, "values"))
-                vals[0] = "☑" if state else "☐"
+                vals[1] = "☑" if state else "☐"
                 self.tr_tree.item(iid, values=vals)
         self._update_tr_summary()
 
     def _update_tr_summary(self):
         sel = sum(1 for x in self.tr_pages_data if x["selected"])
         self.tr_summary_lbl.configure(
-            text=f"Tổng cộng {len(self.tr_pages_data)} Page | Đang chọn: {sel} Page (Click dòng để bật/tắt)"
+            text=f"Tổng: {len(self.tr_pages_data)} Page  |  Đang chọn: {sel} Page"
         )
 
     def _start_scan_pages(self):
         if self.tr_scanning or self.tr_running:
             return
+        self._save_config(show_feedback=False)
+
         raw_lines = [l.strip() for l in self.tr_src_box.get("1.0", "end").splitlines() if l.strip()]
         creds = parse_universal_lines(raw_lines)
         if not creds:
-            messagebox.showwarning("Thiếu dữ liệu", "Vui lòng nhập ít nhất 1 Nick cầm Page hợp lệ.")
+            messagebox.showwarning("Thiếu dữ liệu", "Vui lòng nhập ít nhất 1 Nick cầm Page hợp lệ (UID|Pass|Token...).")
             return
 
         default_pwd = self.tr_default_pwd.get().strip()
@@ -3565,14 +3918,16 @@ class RegPageControlPanel(ctk.CTk):
     def _start_transfer_selected(self):
         if self.tr_running or self.tr_scanning:
             return
+        self._save_config(show_feedback=False)
+
         selected_indices = [i for i, x in enumerate(self.tr_pages_data) if x["selected"]]
         if not selected_indices:
             messagebox.showwarning("Chưa chọn Page", "Hãy quét và chọn ít nhất 1 Page để chuyển.")
             return
 
-        raw_target = self.tr_target_entry.get().strip()
-        if not raw_target:
-            messagebox.showwarning("Thiếu Nick Nhận", "Vui lòng nhập UID hoặc Token của tài khoản nhận Page.")
+        raw_targets_text = self.tr_target_box.get("1.0", "end").strip()
+        if not raw_targets_text:
+            messagebox.showwarning("Thiếu Nick Nhận", "Vui lòng nhập danh sách UID hoặc UID|Token nhận Page.")
             return
 
         try:
@@ -3581,62 +3936,97 @@ class RegPageControlPanel(ctk.CTk):
             messagebox.showerror("Sai thông số", "Delay phải là số >= 0.")
             return
 
+        dist_mode = self.tr_dist_mode.get()
         default_pwd = self.tr_default_pwd.get().strip()
+
         self.tr_running = True
         self.tr_stop_flag.clear()
         self.btn_tr_run.configure(state="disabled", text="🟢 ĐANG CHUYỂN...")
         self.btn_tr_scan.configure(state="disabled")
-        self.btn_tr_stop.configure(state="normal")
+        self.btn_tr_stop.configure(state="normal", text="🛑 DỪNG NGAY")
 
         def _worker_transfer():
-            id_acc_nhan = ""
-            name_acc_nhan = ""
-            token_nhan: Optional[str] = None
-            receiver_proxy: Optional[str] = None
-            target_page_ids = set()
-
-            if raw_target.isdigit() and 5 <= len(raw_target) <= 22:
-                id_acc_nhan = raw_target
-                name_acc_nhan = f"UID {id_acc_nhan}"
-                self._tr_log(f"Đích nhận: UID {id_acc_nhan} (Bắn lời mời Bước 1 & 2).", "success")
-            else:
-                targets = parse_holder_target(raw_target)
-                if not targets:
-                    self._tr_log("Dữ liệu Nick Nhận không hợp lệ!", "error")
-                    self.tr_ui_queue.put(("transfer_done", None))
-                    return
-                t0 = targets[0]
-                t_uid = t0.get("uid") or ""
-                t_tok = t0.get("token")
-                receiver_proxy = t0.get("proxy")
-                if t_tok:
-                    info_n = get_id(t_tok, proxy=receiver_proxy)
-                    if info_n:
-                        id_acc_nhan, name_acc_nhan = info_n
-                        token_nhan = t_tok
-                        target_page_ids = get_managed_page_ids(token_nhan, proxy=receiver_proxy)
-                        self._tr_log(
-                            f"Đích nhận: {name_acc_nhan} ({id_acc_nhan}) -> Auto Accept Full 4 Bước (Đang cầm {len(target_page_ids)} Page).",
-                            "success"
-                        )
-                    elif t_uid:
-                        id_acc_nhan, name_acc_nhan = t_uid, f"UID {t_uid}"
-                        self._tr_log(f"Token nhận DIE -> Chuyển sang bắn mời tới UID {id_acc_nhan}.", "warn")
-                elif t_uid:
-                    id_acc_nhan, name_acc_nhan = t_uid, f"UID {t_uid}"
-                    self._tr_log(f"Đích nhận: UID {id_acc_nhan} (Bắn lời mời Bước 1 & 2).", "success")
-
-            if not id_acc_nhan:
-                self._tr_log("Không xác định được UID tài khoản nhận!", "error")
+            raw_targets = parse_target_lines_flexible(raw_targets_text)
+            if not raw_targets:
+                self._tr_log("❌ Không nhận diện được UID hoặc Token nào hợp lệ trong danh sách Nick nhận!", "error")
                 self.tr_ui_queue.put(("transfer_done", None))
                 return
 
-            ok_cnt, fail_cnt, skip_cnt = 0, 0, 0
-            total = len(selected_indices)
-
-            for pos, idx in enumerate(selected_indices, 1):
+            resolved_targets: List[Dict[str, Any]] = []
+            for t_idx, t in enumerate(raw_targets, 1):
                 if self.tr_stop_flag.is_set():
-                    self._tr_log("⏹ Đã dừng chuyển Page theo yêu cầu.", "warn")
+                    break
+                t_uid = t.get("uid") or ""
+                t_tok = t.get("token")
+                t_px = t.get("proxy")
+
+                if t_tok:
+                    info_n = get_id(t_tok, proxy=t_px)
+                    if info_n:
+                        id_n, name_n = info_n
+                        managed = get_managed_page_ids(t_tok, proxy=t_px)
+                        resolved_targets.append({
+                            "uid": id_n, "name": name_n, "token": t_tok,
+                            "proxy": t_px, "managed_ids": managed
+                        })
+                        self._tr_log(
+                            f"✔ [Nick nhận #{t_idx}] {name_n} ({id_n}) -> Auto Accept Full 4 Bước (Đang cầm {len(managed)} Page).",
+                            "success"
+                        )
+                        continue
+                    elif t_uid:
+                        resolved_targets.append({
+                            "uid": t_uid, "name": f"UID {t_uid}", "token": None,
+                            "proxy": t_px, "managed_ids": set()
+                        })
+                        self._tr_log(f"⚠️ [Nick nhận #{t_idx}] Token DIE -> Chuyển sang bắn mời tới UID {t_uid}.", "warn")
+                        continue
+                    else:
+                        self._tr_log(f"❌ [Nick nhận #{t_idx}] Token DIE và không có UID -> Bỏ qua.", "error")
+                        continue
+
+                if t_uid:
+                    resolved_targets.append({
+                        "uid": t_uid, "name": f"UID {t_uid}", "token": None,
+                        "proxy": t_px, "managed_ids": set()
+                    })
+                    self._tr_log(f"✔ [Nick nhận #{t_idx}] UID {t_uid} -> Chế độ gửi lời mời (Bước 1 & 2).", "success")
+
+            if not resolved_targets or self.tr_stop_flag.is_set():
+                self._tr_log("❌ Không có tài khoản nhận hợp lệ để thực thi.", "error")
+                self.tr_ui_queue.put(("transfer_done", None))
+                return
+
+            jobs: List[Tuple[int, Dict[str, Any]]] = []
+            if "Gửi TẤT CẢ" in dist_mode:
+                for tgt in resolved_targets:
+                    for p_idx in selected_indices:
+                        jobs.append((p_idx, tgt))
+            elif "Xoay vòng" in dist_mode:
+                for pos, p_idx in enumerate(selected_indices):
+                    jobs.append((p_idx, resolved_targets[pos % len(resolved_targets)]))
+            else:
+                n_pages = len(selected_indices)
+                n_targets = len(resolved_targets)
+                base, rem = divmod(n_pages, n_targets)
+                cursor = 0
+                for t_i, tgt in enumerate(resolved_targets):
+                    count = base + (1 if t_i < rem else 0)
+                    for p_idx in selected_indices[cursor:cursor + count]:
+                        jobs.append((p_idx, tgt))
+                    cursor += count
+
+            self._tr_log(
+                f"🚀 Bắt đầu xử lý {len(jobs)} lượt chuyển cho {len(resolved_targets)} Nick nhận ({dist_mode})...",
+                "cyan"
+            )
+
+            ok_cnt, fail_cnt, skip_cnt = 0, 0, 0
+            total = len(jobs)
+
+            for pos, (idx, tgt) in enumerate(jobs, 1):
+                if self.tr_stop_flag.is_set():
+                    self._tr_log("🛑 Đã dừng chuyển Page ngay theo yêu cầu.", "warn")
                     break
 
                 item = self.tr_pages_data[idx]
@@ -3645,14 +4035,19 @@ class RegPageControlPanel(ctk.CTk):
                 p_name = item["page_name"]
                 pwd = item["password"] or default_pwd
 
+                id_acc_nhan = tgt["uid"]
+                token_nhan = tgt["token"]
+                receiver_proxy = tgt["proxy"]
+                target_page_ids = tgt["managed_ids"]
+
                 if p_id in target_page_ids or p_uid in target_page_ids:
                     skip_cnt += 1
-                    self.tr_ui_queue.put(("row_status", (idx, "⏭️ Bỏ qua (Đã là Admin)", "warn")))
-                    self._tr_log(f"[{pos}/{total}] Bỏ qua '{p_name}': Đích đã có quyền quản trị.", "warn")
+                    self.tr_ui_queue.put(("row_status", (idx, f"⏭️ Bỏ qua ({id_acc_nhan} đã là Admin)", "warn")))
+                    self._tr_log(f"[{pos}/{total}] Bỏ qua '{p_name}': {id_acc_nhan} đã có quyền quản trị.", "warn")
                     continue
 
-                self.tr_ui_queue.put(("row_status", (idx, "🔄 Đang xử lý...", "run")))
-                self._tr_log(f"[{pos}/{total}] Đang chuyển '{p_name}' (ID: {p_id} | ProfileUID: {p_uid})...", "cyan")
+                self.tr_ui_queue.put(("row_status", (idx, f"🔄 -> {id_acc_nhan}...", "run")))
+                self._tr_log(f"[{pos}/{total}] Page #{idx+1} '{p_name}' -> Nick nhận {id_acc_nhan}...", "cyan")
 
                 tr_res = execute_super_transfer(
                     page_uid=p_uid,
@@ -3664,7 +4059,7 @@ class RegPageControlPanel(ctk.CTk):
                     receiver_token=token_nhan,
                     sender_proxy=item["src_proxy"],
                     receiver_proxy=receiver_proxy,
-                    step_callback=lambda m, _i=idx: self.tr_ui_queue.put(("row_status", (_i, m, "run")))
+                    step_callback=lambda m, _i=idx, _u=id_acc_nhan: self.tr_ui_queue.put(("row_status", (_i, f"[{_u}] {m}", "run")))
                 )
 
                 now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -3675,30 +4070,34 @@ class RegPageControlPanel(ctk.CTk):
                     ok_cnt += 1
                     target_page_ids.add(p_id)
                     target_page_ids.add(p_uid)
-                    self.tr_ui_queue.put(("row_status", (idx, f"✅ Thành công (Auto Accept -> {id_acc_nhan})", "ok")))
-                    self._tr_log(f"✅ '{p_name}': Chuyển & Auto Accept thành công!", "success")
+                    self.tr_ui_queue.put(("row_status", (idx, f"✅ Auto Accept OK -> {id_acc_nhan}", "ok")))
+                    self._tr_log(f"✅ '{p_name}' -> {id_acc_nhan}: Chuyển & Auto Accept thành công!", "success")
                     with FILE_LOCK:
                         with open("output_chuyen_page.txt", "a", encoding="utf-8") as f:
                             f.write(f"{now_str}|SUCCESS|{p_id}|{p_uid}|{p_name}|From:{item['src_uid']}|To:{id_acc_nhan}\n")
                 elif st == "INVITED_ONLY":
                     if not token_nhan:
                         ok_cnt += 1
-                        self.tr_ui_queue.put(("row_status", (idx, f"✅ Đã bắn lời mời sang {id_acc_nhan}", "ok")))
-                        self._tr_log(f"✅ '{p_name}': Đã bắn lời mời Full Admin sang UID {id_acc_nhan}!", "success")
+                        self.tr_ui_queue.put(("row_status", (idx, f"✅ Đã gửi lời mời -> {id_acc_nhan}", "ok")))
+                        self._tr_log(f"✅ '{p_name}' -> {id_acc_nhan}: Đã bắn lời mời Full Admin thành công!", "success")
                     else:
                         fail_cnt += 1
-                        self.tr_ui_queue.put(("row_status", (idx, f"⚠️ {msg_res}", "warn")))
-                        self._tr_log(f"⚠️ '{p_name}': {msg_res}", "warn")
+                        self.tr_ui_queue.put(("row_status", (idx, f"⚠️ [{id_acc_nhan}] {msg_res}", "warn")))
+                        self._tr_log(f"⚠️ '{p_name}' -> {id_acc_nhan}: {msg_res}", "warn")
                     with FILE_LOCK:
                         with open("output_chuyen_page.txt", "a", encoding="utf-8") as f:
                             f.write(f"{now_str}|INVITED_ONLY|{p_id}|{p_uid}|{p_name}|From:{item['src_uid']}|To:{id_acc_nhan}|{msg_res}\n")
                 else:
                     fail_cnt += 1
-                    self.tr_ui_queue.put(("row_status", (idx, f"❌ {msg_res}", "err")))
-                    self._tr_log(f"❌ '{p_name}': {msg_res}", "error")
+                    self.tr_ui_queue.put(("row_status", (idx, f"❌ [{id_acc_nhan}] {msg_res}", "err")))
+                    self._tr_log(f"❌ '{p_name}' -> {id_acc_nhan}: {msg_res}", "error")
 
-                if pos < total and delay > 0 and not self.tr_stop_flag.is_set():
-                    time.sleep(delay)
+                if pos < total and delay > 0:
+                    end_t = time.time() + delay
+                    while time.time() < end_t:
+                        if self.tr_stop_flag.is_set():
+                            break
+                        time.sleep(0.2)
 
             self._tr_log(f"=== XONG: Thành công {ok_cnt} | Thất bại {fail_cnt} | Bỏ qua {skip_cnt} ===", "success")
             self.tr_ui_queue.put(("transfer_done", None))
@@ -3707,7 +4106,7 @@ class RegPageControlPanel(ctk.CTk):
 
     def _stop_transfer_selected(self):
         self.tr_stop_flag.set()
-        self.btn_tr_stop.configure(state="disabled")
+        self.btn_tr_stop.configure(state="disabled", text="⏳ ĐANG DỪNG...")
 
     # ==========================================================================
     # TAB 3: GET TOKEN EAAAAU (BLOKS CAA V5)
@@ -3752,7 +4151,7 @@ class RegPageControlPanel(ctk.CTk):
         )
         self.btn_tk_start.pack(side="left", fill="x", expand=True, padx=(0, 6))
         self.btn_tk_stop = ctk.CTkButton(
-            btn_row, text="⏹ DỪNG", width=85, height=38,
+            btn_row, text="🛑 DỪNG", width=95, height=38,
             fg_color="#dc2626", hover_color="#b91c1c", state="disabled",
             command=self._stop_get_token
         )
@@ -3798,6 +4197,8 @@ class RegPageControlPanel(ctk.CTk):
     def _start_get_token(self):
         if self.tk_running:
             return
+        self._save_config(show_feedback=False)
+
         raw_lines = [l.strip() for l in self.tk_input_box.get("1.0", "end").splitlines() if l.strip()]
         acc_list = parse_universal_lines(raw_lines)
         if not acc_list:
@@ -3925,6 +4326,7 @@ class RegPageControlPanel(ctk.CTk):
                     self.tr_tree.insert(
                         "", "end", iid=str(idx),
                         values=(
+                            idx + 1,
                             "☑" if item["selected"] else "☐",
                             item["src_uid"],
                             item["page_name"],
@@ -3939,13 +4341,13 @@ class RegPageControlPanel(ctk.CTk):
                 iid = str(idx)
                 if self.tr_tree.exists(iid):
                     vals = list(self.tr_tree.item(iid, "values"))
-                    vals[5] = txt
+                    vals[6] = txt
                     self.tr_tree.item(iid, values=vals, tags=(tag,))
             elif ev == "transfer_done":
                 self.tr_running = False
                 self.btn_tr_run.configure(state="normal", text="🚀 CHUYỂN PAGE ĐÃ CHỌN")
                 self.btn_tr_scan.configure(state="normal")
-                self.btn_tr_stop.configure(state="disabled")
+                self.btn_tr_stop.configure(state="disabled", text="🛑 DỪNG NGAY")
 
         for _ in range(30):
             try:
